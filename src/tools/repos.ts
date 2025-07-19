@@ -13,10 +13,148 @@ import {
   GitPullRequestQuery,
   GitPullRequestQueryInput,
   GitPullRequestQueryType,
+  GitPullRequest,
+  GitRepository,
+  IdentityRefWithVote,
+  GitCommitRef,
+  GitUserDate,
+  GitChange,
+  GitItem,
+  GitCommitChanges,
 } from "azure-devops-node-api/interfaces/GitInterfaces.js";
+import { TeamProjectReference } from "azure-devops-node-api/interfaces/CoreInterfaces.js";
 import { z } from "zod";
 import { getCurrentUserDetails } from "./auth.js";
-import { GitRepository } from "azure-devops-node-api/interfaces/TfvcInterfaces.js";
+import { IdentityRef } from "azure-devops-node-api/interfaces/common/VSSInterfaces.js";
+
+export type IdentityResult = Pick<IdentityRef, "id" | "displayName" | "uniqueName">;
+export type IdentityWithVoteResult = Pick<IdentityRefWithVote, "id" | "displayName" | "uniqueName" | "vote" | "hasDeclined" | "isRequired">;
+export type ProjectResult = Pick<TeamProjectReference, "id" | "description" | "name">;
+export type RepositoryResult = Pick<GitRepository, "id" | "defaultBranch" | "name" | "isFork"> & {
+  project?: ProjectResult;
+};
+export type PullRequestResult = Pick<
+  GitPullRequest,
+  "closedDate" | "creationDate" | "description" | "pullRequestId" | "sourceRefName" | "status" | "targetRefName" | "title" | "workItemRefs" | "isDraft"
+> & {
+  commits?: GitCommitResult[];
+  closedBy?: IdentityResult;
+  createdBy?: IdentityResult;
+  reviewers?: IdentityWithVoteResult[];
+  lastMergeTargetCommitId?: string;
+};
+export type GitUserDateResult = Pick<GitUserDate, "email" | "date">;
+export type GitCommitResult = Pick<GitCommitRef, "commitId" | "comment" | "commentTruncated"> & {
+  author?: GitUserDateResult;
+  committer?: GitUserDateResult;
+};
+export type GitItemResult = Pick<GitItem, "gitObjectType" | "objectId" | "originalObjectId" | "isFolder" | "isSymLink" | "path">;
+export type GitChangeResult = Pick<GitChange, "changeId" | "originalPath" | "changeType"> & {
+  item?: GitItemResult;
+};
+export type GitCommitChangesResult = Pick<GitCommitChanges, "changeCounts"> & {
+  changes?: GitChangeResult[];
+};
+
+const toIdentityResult = (identityRef: IdentityRef): IdentityResult => {
+  return {
+    id: identityRef.id,
+    displayName: identityRef.displayName,
+    uniqueName: identityRef.uniqueName,
+  };
+};
+
+const toIdentityWithVoteResult = (identityRef: IdentityRefWithVote): IdentityWithVoteResult => {
+  return {
+    id: identityRef.id,
+    displayName: identityRef.displayName,
+    uniqueName: identityRef.uniqueName,
+    vote: identityRef.vote,
+    hasDeclined: identityRef.hasDeclined,
+    isRequired: identityRef.isRequired,
+  };
+};
+
+const toProjectResult = (projectRef: TeamProjectReference): ProjectResult => {
+  return {
+    id: projectRef.id,
+    description: projectRef.description,
+    name: projectRef.name,
+  };
+};
+
+const toRepositoryResult = (repo: GitRepository): RepositoryResult => {
+  return {
+    id: repo.id,
+    defaultBranch: repo.defaultBranch,
+    name: repo.name,
+    isFork: repo.isFork,
+    project: repo.project && toProjectResult(repo.project),
+  };
+};
+
+const toPullRequestResult = (pr: GitPullRequest): PullRequestResult => {
+  return {
+    creationDate: pr.creationDate,
+    closedDate: pr.closedDate,
+    description: pr.description,
+    pullRequestId: pr.pullRequestId,
+    sourceRefName: pr.sourceRefName,
+    targetRefName: pr.targetRefName,
+    status: pr.status,
+    title: pr.title,
+    workItemRefs: pr.workItemRefs,
+    closedBy: pr.closedBy && toIdentityResult(pr.closedBy),
+    createdBy: pr.createdBy && toIdentityResult(pr.createdBy),
+    reviewers: pr.reviewers ? pr.reviewers.map((r) => toIdentityWithVoteResult(r)) : undefined,
+    lastMergeTargetCommitId: pr.lastMergeTargetCommit?.commitId,
+    commits: pr.commits ? pr.commits.map((c) => toGitCommitResult(c)) : undefined,
+  };
+};
+
+const toGitUserDateResult = (user: GitUserDate): GitUserDateResult => {
+  return {
+    email: user.email,
+    date: user.date,
+  };
+};
+
+const toGitCommitResult = (commit: GitCommitRef): GitCommitResult => {
+  return {
+    commitId: commit.commitId,
+    comment: commit.comment,
+    commentTruncated: commit.commentTruncated,
+    author: commit.author && toGitUserDateResult(commit.author),
+    committer: commit.committer && toGitUserDateResult(commit.committer),
+  };
+};
+
+const toGitItemResult = (item: GitItem): GitItemResult => {
+  return {
+    gitObjectType: item.gitObjectType,
+    objectId: item.objectId,
+    originalObjectId: item.originalObjectId,
+    isFolder: item.isFolder,
+    isSymLink: item.isSymLink,
+    path: item.path,
+  };
+};
+
+const toGitChangeResult = (change: GitChange): GitChangeResult => {
+  return {
+    changeId: change.changeId,
+    originalPath: change.originalPath,
+    changeType: change.changeType,
+    item: change.item && toGitItemResult(change.item),
+  };
+};
+
+const toGitCommitChangesResult = (changes: GitCommitChanges): GitCommitChangesResult => {
+  return {
+    changeCounts: changes.changeCounts,
+    changes: changes.changes ? changes.changes.map((c) => toGitChangeResult(c)) : undefined,
+  };
+};
 
 const REPO_TOOLS = {
   list_repos_by_project: "repo_list_repos_by_project",
@@ -192,19 +330,10 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<Acce
 
         const paginatedRepositories = filteredRepositories?.sort((a, b) => a.name?.localeCompare(b.name ?? "") ?? 0).slice(skip, skip + top);
 
-        // Filter out the irrelevant properties
-        const trimmedRepositories = paginatedRepositories?.map((repo) => ({
-          id: repo.id,
-          name: repo.name,
-          isDisabled: repo.isDisabled,
-          isFork: repo.isFork,
-          isInMaintenance: repo.isInMaintenance,
-          webUrl: repo.webUrl,
-          size: repo.size,
-        }));
+        const repos = paginatedRepositories.map((repo) => toRepositoryResult(repo));
 
         return {
-          content: [{ type: "text", text: JSON.stringify(trimmedRepositories, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(repos) }],
         };
       }
     );
@@ -257,22 +386,10 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<Acce
           top
         );
 
-        // Filter out the irrelevant properties
-        const filteredPullRequests = pullRequests?.map((pr) => ({
-          pullRequestId: pr.pullRequestId,
-          codeReviewId: pr.codeReviewId,
-          status: pr.status,
-          createdBy: {
-            displayName: pr.createdBy?.displayName,
-            uniqueName: pr.createdBy?.uniqueName,
-          },
-          creationDate: pr.creationDate,
-          title: pr.title,
-          isDraft: pr.isDraft,
-        }));
+        const prResult = pullRequests ? pullRequests.map((pr) => toPullRequestResult(pr)) : [];
 
         return {
-          content: [{ type: "text", text: JSON.stringify(filteredPullRequests, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(prResult) }],
         };
       }
     );
@@ -322,23 +439,10 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<Acce
           top
         );
 
-        // Filter out the irrelevant properties
-        const filteredPullRequests = pullRequests?.map((pr) => ({
-          pullRequestId: pr.pullRequestId,
-          codeReviewId: pr.codeReviewId,
-          repository: pr.repository?.name,
-          status: pr.status,
-          createdBy: {
-            displayName: pr.createdBy?.displayName,
-            uniqueName: pr.createdBy?.uniqueName,
-          },
-          creationDate: pr.creationDate,
-          title: pr.title,
-          isDraft: pr.isDraft,
-        }));
+        const prResult = pullRequests ? pullRequests.map((pr) => toPullRequestResult(pr)) : [];
 
         return {
-          content: [{ type: "text", text: JSON.stringify(filteredPullRequests, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(prResult) }],
         };
       }
     );
@@ -463,8 +567,10 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<Acce
           throw new Error(`Repository ${repositoryNameOrId} not found in project ${project}`);
         }
 
+        const repoResult = toRepositoryResult(repository);
+
         return {
-          content: [{ type: "text", text: JSON.stringify(repository, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(repoResult) }],
         };
       }
     );
@@ -512,8 +618,9 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<Acce
         const connection = await connectionProvider();
         const gitApi = await connection.getGitApi();
         const pullRequest = await gitApi.getPullRequest(repositoryId, pullRequestId);
+        const text = pullRequest ? JSON.stringify(toPullRequestResult(pullRequest)) : "Pull request not found.";
         return {
-          content: [{ type: "text", text: JSON.stringify(pullRequest, null, 2) }],
+          content: [{ type: "text", text }],
         };
       }
     );
@@ -531,8 +638,9 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<Acce
         const connection = await connectionProvider();
         const gitApi = await connection.getGitApi();
         const commits = await gitApi.getPullRequestCommits(repositoryId, pullRequestId);
+        const commitsResult = commits ? commits.map((commit) => toGitCommitResult(commit)) : [];
         return {
-          content: [{ type: "text", text: JSON.stringify(commits) }],
+          content: [{ type: "text", text: JSON.stringify(commitsResult) }],
         };
       }
     );
@@ -550,8 +658,9 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<Acce
         const connection = await connectionProvider();
         const gitApi = await connection.getGitApi();
         const changes = await gitApi.getChanges(commitId, repositoryId);
+        const text = changes ? JSON.stringify(toGitCommitChangesResult(changes)) : "No changes found.";
         return {
-          content: [{ type: "text", text: JSON.stringify(changes) }],
+          content: [{ type: "text", text }],
         };
       }
     );
