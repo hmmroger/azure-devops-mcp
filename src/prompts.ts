@@ -15,7 +15,7 @@ function configurePrompts(server: McpServer) {
           type: "text",
           text: String.raw`
 # Task
-Use the '${CORE_TOOLS.list_projects}' tool to retrieve all projects in the current Azure DevOps organization.
+Use the '${CORE_TOOLS.list_azure_devops_projects}' tool to retrieve all projects in the current Azure DevOps organization.
 Present the results in a table with the following columns: Project ID, Name, and Description.`,
         },
       },
@@ -30,7 +30,7 @@ Present the results in a table with the following columns: Project ID, Name, and
           type: "text",
           text: String.raw`
   # Task
-  Use the '${CORE_TOOLS.list_project_teams}' tool to retrieve all teams for the project '${project}'.
+  Use the '${CORE_TOOLS.list_azure_devops_teams_by_project}' tool to retrieve all teams for the project '${project}'.
   Present the results in a table with the following columns: Team ID, and Name`,
         },
       },

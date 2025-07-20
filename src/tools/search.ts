@@ -6,189 +6,240 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebApi } from "azure-devops-node-api";
 import { IGitApi } from "azure-devops-node-api/GitApi.js";
 import { z } from "zod";
+import { validate } from "uuid";
 import { apiVersion } from "../utils.js";
 import { orgName } from "../index.js";
 import { VersionControlRecursionType } from "azure-devops-node-api/interfaces/GitInterfaces.js";
 import { GitItem } from "azure-devops-node-api/interfaces/GitInterfaces.js";
 
-const SEARCH_TOOLS = {
-  search_code: "search_code",
-  search_wiki: "search_wiki",
-  search_workitem: "search_workitem",
-};
-
-function configureSearchTools(server: McpServer, tokenProvider: () => Promise<AccessToken>, connectionProvider: () => Promise<WebApi>, userAgentProvider: () => string) {
-  /*
-    CODE SEARCH
-    Get the code search results for a given search text.
-  */
-  server.tool(
-    SEARCH_TOOLS.search_code,
-    "Get the code search results for a given search text.",
-    {
-      searchRequest: z
-        .object({
-          searchText: z.string().describe("Search text to find in code"),
-          $skip: z.number().default(0).describe("Number of results to skip (for pagination)"),
-          $top: z.number().default(5).describe("Number of results to return (for pagination)"),
-          filters: z
-            .object({
-              Project: z.array(z.string()).optional().describe("Filter in these projects"),
-              Repository: z.array(z.string()).optional().describe("Filter in these repositories"),
-              Path: z.array(z.string()).optional().describe("Filter in these paths"),
-              Branch: z.array(z.string()).optional().describe("Filter in these branches"),
-              CodeElement: z.array(z.string()).optional().describe("Filter for these code elements (e.g., classes, functions, symbols)"),
-              // Note: CodeElement is optional and can be used to filter results by specific code elements.
-              // It can be a string or an array of strings.
-              // If provided, the search will only return results that match the specified code elements.
-              // This is useful for narrowing down the search to specific classes, functions, definitions, or symbols.
-              // Example: CodeElement: ["MyClass", "MyFunction"]
-            })
-            .partial()
-            .optional(),
-          includeFacets: z.boolean().optional(),
-        })
-        .strict(),
-    },
-    async ({ searchRequest }) => {
-      const accessToken = await tokenProvider();
-      const connection = await connectionProvider();
-      const url = `https://almsearch.dev.azure.com/${orgName}/_apis/search/codesearchresults?api-version=${apiVersion}`;
-
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${accessToken.token}`,
-          "User-Agent": userAgentProvider(),
-        },
-        body: JSON.stringify(searchRequest),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Azure DevOps Code Search API error: ${response.status} ${response.statusText}`);
-      }
-
-      const resultText = await response.text();
-      const resultJson = JSON.parse(resultText) as { results?: SearchResult[] };
-
-      const topResults: SearchResult[] = Array.isArray(resultJson.results) ? resultJson.results.slice(0, Math.min(searchRequest.$top, resultJson.results.length)) : [];
-
-      const gitApi = await connection.getGitApi();
-      const combinedResults = await fetchCombinedResults(topResults, gitApi);
-
-      return {
-        content: [{ type: "text", text: resultText + JSON.stringify(combinedResults) }],
-      };
-    }
-  );
-
-  /*
-  WIKI SEARCH
-  Get wiki search results for a given search text.
-*/
-  server.tool(
-    SEARCH_TOOLS.search_wiki,
-    "Get wiki search results for a given search text.",
-    {
-      searchRequest: z
-        .object({
-          searchText: z.string().describe("Search text to find in wikis"),
-          $skip: z.number().default(0).describe("Number of results to skip (for pagination)"),
-          $top: z.number().default(10).describe("Number of results to return (for pagination)"),
-          filters: z
-            .object({
-              Project: z.array(z.string()).optional().describe("Filter in these projects"),
-              Wiki: z.array(z.string()).optional().describe("Filter in these wiki names"),
-            })
-            .partial()
-            .optional()
-            .describe("Filters to apply to the search text"),
-          includeFacets: z.boolean().optional(),
-        })
-        .strict(),
-    },
-    async ({ searchRequest }) => {
-      const accessToken = await tokenProvider();
-      const url = `https://almsearch.dev.azure.com/${orgName}/_apis/search/wikisearchresults?api-version=${apiVersion}`;
-
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${accessToken.token}`,
-          "User-Agent": userAgentProvider(),
-        },
-        body: JSON.stringify(searchRequest),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Azure DevOps Wiki Search API error: ${response.status} ${response.statusText}`);
-      }
-
-      const result = await response.text();
-      return {
-        content: [{ type: "text", text: result }],
-      };
-    }
-  );
-
-  /*
-  WORK ITEM SEARCH
-  Get work item search results for a given search text.
-*/
-  server.tool(
-    SEARCH_TOOLS.search_workitem,
-    "Get work item search results for a given search text.",
-    {
-      searchRequest: z
-        .object({
-          searchText: z.string().describe("Search text to find in work items"),
-          $skip: z.number().default(0).describe("Number of results to skip for pagination"),
-          $top: z.number().default(10).describe("Number of results to return"),
-          filters: z
-            .object({
-              "System.TeamProject": z.array(z.string()).optional().describe("Filter by team project"),
-              "System.AreaPath": z.array(z.string()).optional().describe("Filter by area path"),
-              "System.WorkItemType": z.array(z.string()).optional().describe("Filter by work item type like Bug, Task, User Story"),
-              "System.State": z.array(z.string()).optional().describe("Filter by state"),
-              "System.AssignedTo": z.array(z.string()).optional().describe("Filter by assigned to"),
-            })
-            .partial()
-            .optional(),
-          includeFacets: z.boolean().optional(),
-        })
-        .strict(),
-    },
-    async ({ searchRequest }) => {
-      const accessToken = await tokenProvider();
-      const url = `https://almsearch.dev.azure.com/${orgName}/_apis/search/workitemsearchresults?api-version=${apiVersion}`;
-
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${accessToken.token}`,
-          "User-Agent": userAgentProvider(),
-        },
-        body: JSON.stringify(searchRequest),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Azure DevOps Work Item Search API error: ${response.status} ${response.statusText}`);
-      }
-
-      const result = await response.text();
-      return {
-        content: [{ type: "text", text: result }],
-      };
-    }
-  );
+export interface CodeSearchFilters {
+  Project?: string[];
+  Repository?: string[];
+  Path?: string[];
+  Branch?: string[];
+  CodeElement?: string[];
 }
 
-/*
-  Fetch git repo file content for top 5(default) search results.
-*/
+export interface CodeSearchRequest {
+  searchText: string;
+  $skip: number;
+  $top: number;
+  filters?: CodeSearchFilters;
+  includeFacets?: boolean;
+}
+
+export const SEARCH_TOOLS = {
+  search_azure_devops_code: "search_azure_devops_code",
+  search_azure_devops_wiki: "search_azure_devops_wiki",
+  search_azure_devops_workitem: "search_azure_devops_workitem",
+};
+
+export async function performCodeSearch(
+  searchRequest: CodeSearchRequest,
+  tokenProvider: () => Promise<AccessToken>,
+  connectionProvider: () => Promise<WebApi>,
+  userAgentProvider: () => string,
+  projectFilter?: string,
+  repoFilter?: string,
+  pathFilter?: string
+): Promise<string> {
+  const accessToken = await tokenProvider();
+  const connection = await connectionProvider();
+  const gitApi = await connection.getGitApi();
+  const url = `https://almsearch.dev.azure.com/${orgName}/_apis/search/codesearchresults?api-version=${apiVersion}`;
+
+  // ID check
+  if (projectFilter && validate(projectFilter)) {
+    const coreApi = await connection.getCoreApi();
+    const project = await coreApi.getProject(projectFilter);
+    projectFilter = project.name;
+  }
+
+  if (repoFilter && validate(repoFilter)) {
+    const repo = await gitApi.getRepository(repoFilter);
+    repoFilter = repo.name;
+    // auto-recover project constraint
+    if (repo.project) {
+      projectFilter = repo.project.name;
+    }
+  }
+
+  if (repoFilter && !projectFilter) {
+    throw new Error(`project filter is reuiqred when repository filter is used.`);
+  } else if (pathFilter && (!repoFilter || !projectFilter)) {
+    throw new Error(`Both project and repository filter are reuiqred when path filter is used.`);
+  }
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${accessToken.token}`,
+      "User-Agent": userAgentProvider(),
+    },
+    body: JSON.stringify(searchRequest),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Azure DevOps Code Search API error: ${response.status} ${response.statusText}`);
+  }
+
+  const resultText = await response.text();
+  const resultJson = JSON.parse(resultText) as { results?: SearchResult[] };
+
+  const topResults: SearchResult[] = Array.isArray(resultJson.results) ? resultJson.results.slice(0, Math.min(searchRequest.$top, resultJson.results.length)) : [];
+
+  const combinedResults = await fetchCombinedResults(topResults, gitApi);
+
+  return resultText + JSON.stringify(combinedResults);
+}
+
+export function configureSearchTools(
+  server: McpServer,
+  tokenProvider: () => Promise<AccessToken>,
+  connectionProvider: () => Promise<WebApi>,
+  userAgentProvider: () => string,
+  disabledTools: Set<string>
+) {
+  /**
+   * CODE SEARCH
+   * Get the code search results for a given search text.
+   */
+  if (!disabledTools.has(SEARCH_TOOLS.search_azure_devops_code)) {
+    server.tool(
+      SEARCH_TOOLS.search_azure_devops_code,
+      "Get the code search results for a given search text.",
+      {
+        searchText: z.string().describe("Search text to find in code"),
+        skip: z.number().default(0).describe("Number of results to skip (for pagination)"),
+        top: z.number().default(5).describe("Number of results to return (for pagination)"),
+        projectName: z.string().optional().describe("Filter search results in this project name."),
+        repositoryName: z.string().optional().describe("Filter search results in this repository name."),
+        path: z.string().optional().describe("Filter search results under this item path."),
+      },
+      async ({ searchText, skip, top, projectName, repositoryName, path }) => {
+        try {
+          const result = await performCodeSearch({ searchText, $skip: skip, $top: top }, tokenProvider, connectionProvider, userAgentProvider, projectName, repositoryName, path);
+          return {
+            content: [{ type: "text", text: result }],
+          };
+        } catch (error) {
+          const message = (error as Error).message || "Code search failed.";
+          return {
+            content: [{ type: "text", text: message }],
+            isError: true,
+          };
+        }
+      }
+    );
+  }
+
+  /**
+   * WIKI SEARCH
+   * Get wiki search results for a given search text.
+   */
+  if (!disabledTools.has(SEARCH_TOOLS.search_azure_devops_wiki)) {
+    server.tool(
+      SEARCH_TOOLS.search_azure_devops_wiki,
+      "Get wiki search results for a given search text.",
+      {
+        searchRequest: z
+          .object({
+            searchText: z.string().describe("Search text to find in wikis"),
+            $skip: z.number().default(0).describe("Number of results to skip (for pagination)"),
+            $top: z.number().default(10).describe("Number of results to return (for pagination)"),
+            filters: z
+              .object({
+                Project: z.array(z.string()).optional().describe("Filter in these projects"),
+                Wiki: z.array(z.string()).optional().describe("Filter in these wiki names"),
+              })
+              .partial()
+              .optional()
+              .describe("Filters to apply to the search text"),
+            includeFacets: z.boolean().optional(),
+          })
+          .strict(),
+      },
+      async ({ searchRequest }) => {
+        const accessToken = await tokenProvider();
+        const url = `https://almsearch.dev.azure.com/${orgName}/_apis/search/wikisearchresults?api-version=${apiVersion}`;
+
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${accessToken.token}`,
+            "User-Agent": userAgentProvider(),
+          },
+          body: JSON.stringify(searchRequest),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Azure DevOps Wiki Search API error: ${response.status} ${response.statusText}`);
+        }
+
+        const result = await response.text();
+        return {
+          content: [{ type: "text", text: result }],
+        };
+      }
+    );
+  }
+
+  /**
+   * WORK ITEM SEARCH
+   * Get work item search results for a given search text.
+   */
+  if (!disabledTools.has(SEARCH_TOOLS.search_azure_devops_workitem)) {
+    server.tool(
+      SEARCH_TOOLS.search_azure_devops_workitem,
+      "Get work item search results for a given search text.",
+      {
+        searchRequest: z
+          .object({
+            searchText: z.string().describe("Search text to find in work items"),
+            $skip: z.number().default(0).describe("Number of results to skip for pagination"),
+            $top: z.number().default(10).describe("Number of results to return"),
+            filters: z
+              .object({
+                "System.TeamProject": z.array(z.string()).optional().describe("Filter by team project"),
+                "System.AreaPath": z.array(z.string()).optional().describe("Filter by area path"),
+                "System.WorkItemType": z.array(z.string()).optional().describe("Filter by work item type like Bug, Task, User Story"),
+                "System.State": z.array(z.string()).optional().describe("Filter by state"),
+                "System.AssignedTo": z.array(z.string()).optional().describe("Filter by assigned to"),
+              })
+              .partial()
+              .optional(),
+            includeFacets: z.boolean().optional(),
+          })
+          .strict(),
+      },
+      async ({ searchRequest }) => {
+        const accessToken = await tokenProvider();
+        const url = `https://almsearch.dev.azure.com/${orgName}/_apis/search/workitemsearchresults?api-version=${apiVersion}`;
+
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${accessToken.token}`,
+            "User-Agent": userAgentProvider(),
+          },
+          body: JSON.stringify(searchRequest),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Azure DevOps Work Item Search API error: ${response.status} ${response.statusText}`);
+        }
+
+        const result = await response.text();
+        return {
+          content: [{ type: "text", text: result }],
+        };
+      }
+    );
+  }
+}
 
 interface SearchResult {
   project?: { id?: string };
@@ -242,5 +293,3 @@ async function fetchCombinedResults(topSearchResults: SearchResult[], gitApi: IG
   }
   return combinedResults;
 }
-
-export { SEARCH_TOOLS, configureSearchTools };

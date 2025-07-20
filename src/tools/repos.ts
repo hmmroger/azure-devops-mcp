@@ -21,6 +21,10 @@ import {
   GitChange,
   GitItem,
   GitCommitChanges,
+  GitBaseVersionDescriptor,
+  GitTargetVersionDescriptor,
+  GitCommitDiffs,
+  VersionControlChangeType,
 } from "azure-devops-node-api/interfaces/GitInterfaces.js";
 import { TeamProjectReference } from "azure-devops-node-api/interfaces/CoreInterfaces.js";
 import { z } from "zod";
@@ -28,11 +32,15 @@ import { getCurrentUserDetails } from "./auth.js";
 import { IdentityRef } from "azure-devops-node-api/interfaces/common/VSSInterfaces.js";
 
 export type IdentityResult = Pick<IdentityRef, "id" | "displayName" | "uniqueName">;
+
 export type IdentityWithVoteResult = Pick<IdentityRefWithVote, "id" | "displayName" | "uniqueName" | "vote" | "hasDeclined" | "isRequired">;
+
 export type ProjectResult = Pick<TeamProjectReference, "id" | "description" | "name">;
+
 export type RepositoryResult = Pick<GitRepository, "id" | "defaultBranch" | "name" | "isFork"> & {
   project?: ProjectResult;
 };
+
 export type PullRequestResult = Pick<
   GitPullRequest,
   "closedDate" | "creationDate" | "description" | "pullRequestId" | "sourceRefName" | "status" | "targetRefName" | "title" | "workItemRefs" | "isDraft"
@@ -41,18 +49,29 @@ export type PullRequestResult = Pick<
   closedBy?: IdentityResult;
   createdBy?: IdentityResult;
   reviewers?: IdentityWithVoteResult[];
-  lastMergeTargetCommitId?: string;
+  pullRequestChanges?: GitCommitChangesResult;
 };
+
 export type GitUserDateResult = Pick<GitUserDate, "email" | "date">;
+
 export type GitCommitResult = Pick<GitCommitRef, "commitId" | "comment" | "commentTruncated"> & {
   author?: GitUserDateResult;
   committer?: GitUserDateResult;
 };
+
 export type GitItemResult = Pick<GitItem, "gitObjectType" | "objectId" | "originalObjectId" | "isFolder" | "isSymLink" | "path">;
-export type GitChangeResult = Pick<GitChange, "changeId" | "originalPath" | "changeType"> & {
+
+export type ProperChangeType = keyof typeof VersionControlChangeType;
+export type GitChangeResult = Pick<GitChange, "changeId" | "originalPath"> & {
+  changeType?: ProperChangeType;
   item?: GitItemResult;
 };
-export type GitCommitChangesResult = Pick<GitCommitChanges, "changeCounts"> & {
+
+export interface GitCommitChangesResult {
+  changes?: GitChangeResult[];
+}
+
+export type GitCommitDiffsResult = Pick<GitCommitDiffs, "allChangesIncluded" | "baseCommit" | "commonCommit" | "targetCommit"> & {
   changes?: GitChangeResult[];
 };
 
@@ -107,7 +126,6 @@ const toPullRequestResult = (pr: GitPullRequest): PullRequestResult => {
     closedBy: pr.closedBy && toIdentityResult(pr.closedBy),
     createdBy: pr.createdBy && toIdentityResult(pr.createdBy),
     reviewers: pr.reviewers ? pr.reviewers.map((r) => toIdentityWithVoteResult(r)) : undefined,
-    lastMergeTargetCommitId: pr.lastMergeTargetCommit?.commitId,
     commits: pr.commits ? pr.commits.map((c) => toGitCommitResult(c)) : undefined,
   };
 };
@@ -144,32 +162,40 @@ const toGitChangeResult = (change: GitChange): GitChangeResult => {
   return {
     changeId: change.changeId,
     originalPath: change.originalPath,
-    changeType: change.changeType,
+    changeType: change.changeType ? (VersionControlChangeType[change.changeType] as ProperChangeType) : undefined,
     item: change.item && toGitItemResult(change.item),
   };
 };
 
 const toGitCommitChangesResult = (changes: GitCommitChanges): GitCommitChangesResult => {
   return {
-    changeCounts: changes.changeCounts,
     changes: changes.changes ? changes.changes.map((c) => toGitChangeResult(c)) : undefined,
   };
 };
 
+const toGitCommitDiffsResult = (commitDiffs: GitCommitDiffs): GitCommitDiffsResult => {
+  return {
+    changes: commitDiffs.changes ? commitDiffs.changes.map((c) => toGitChangeResult(c)) : undefined,
+    baseCommit: commitDiffs.baseCommit,
+    commonCommit: commitDiffs.commonCommit,
+    targetCommit: commitDiffs.targetCommit,
+    allChangesIncluded: commitDiffs.allChangesIncluded,
+  };
+};
+
 const REPO_TOOLS = {
-  list_repos_by_project: "repo_list_repos_by_project",
+  get_azure_devops_repositories: "get_azure_devops_repositories",
+  get_azure_devops_pull_request_by_id: "get_azure_devops_pull_request_by_id",
+  get_azure_devops_changes_by_commit: "get_azure_devops_changes_by_commit",
+  get_azure_devops_item_content_by_commit: "get_azure_devops_item_content_by_commit",
+  get_azure_devops_content_by_objectid: "get_azure_devops_content_by_objectid",
+  list_azure_devops_pull_request_threads: "list_azure_devops_pull_request_threads",
+  list_azure_devops_pull_request_comments_by_thread: "list_azure_devops_pull_request_comments_by_thread",
   list_pull_requests_by_repo: "repo_list_pull_requests_by_repo",
   list_pull_requests_by_project: "repo_list_pull_requests_by_project",
   list_branches_by_repo: "repo_list_branches_by_repo",
   list_my_branches_by_repo: "repo_list_my_branches_by_repo",
-  list_pull_request_threads: "repo_list_pull_request_threads",
-  list_pull_request_thread_comments: "repo_list_pull_request_thread_comments",
-  get_repo_by_name_or_id: "repo_get_repo_by_name_or_id",
   get_branch_by_name: "repo_get_branch_by_name",
-  get_pull_request_by_id: "repo_get_pull_request_by_id",
-  get_pull_request_commits: "get_pull_request_commits",
-  get_changes_by_commit: "get_changes_by_commit",
-  get_item_content_by_commit: "get_item_content_by_commit",
   create_pull_request: "repo_create_pull_request",
   update_pull_request_status: "repo_update_pull_request_status",
   update_pull_request_reviewers: "repo_update_pull_request_reviewers",
@@ -205,14 +231,186 @@ function pullRequestStatusStringToInt(status: string): number {
   }
 }
 
-function filterReposByName(repositories: GitRepository[], repoNameFilter: string): GitRepository[] {
-  const lowerCaseFilter = repoNameFilter.toLowerCase();
-  const filteredByName = repositories?.filter((repo) => repo.name?.toLowerCase().includes(lowerCaseFilter));
-
-  return filteredByName;
-}
-
 function configureRepoTools(server: McpServer, tokenProvider: () => Promise<AccessToken>, connectionProvider: () => Promise<WebApi>, disabledTools: Set<string>) {
+  if (!disabledTools.has(REPO_TOOLS.get_azure_devops_repositories)) {
+    server.tool(
+      REPO_TOOLS.get_azure_devops_repositories,
+      "[Azure DevOps] Get repositories for a given project with optional repository name filter.",
+      {
+        project: z.string().describe("The name or ID of the Azure DevOps project."),
+        top: z.number().default(100).describe("The maximum number of repositories to return."),
+        skip: z.number().default(0).describe("The number of repositories to skip. Defaults to 0."),
+        repositoryNameOrId: z.string().optional().describe("Optional filter to search for repositories by name or ID."),
+      },
+      async ({ project, top, skip, repositoryNameOrId }) => {
+        try {
+          const reposResult = await getRepositoriesResult(connectionProvider, project, repositoryNameOrId);
+          const paginatedRepositories = reposResult.sort((a, b) => a.name?.localeCompare(b.name ?? "") ?? 0).slice(skip, skip + top);
+          return {
+            content: [{ type: "text", text: JSON.stringify(paginatedRepositories) }],
+          };
+        } catch (error) {
+          const message = (error as Error).message || "Failed to get repositories.";
+          return {
+            content: [{ type: "text", text: message }],
+            isError: true,
+          };
+        }
+      }
+    );
+  }
+
+  if (!disabledTools.has(REPO_TOOLS.get_azure_devops_pull_request_by_id)) {
+    server.tool(
+      REPO_TOOLS.get_azure_devops_pull_request_by_id,
+      "[Azure DevOps] Get a pull request by its ID.",
+      {
+        repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
+        pullRequestId: z.number().describe("The ID of the pull request to retrieve."),
+      },
+      async ({ repositoryId, pullRequestId }) => {
+        try {
+          const prRes = await getPullRequestResult(connectionProvider, repositoryId, pullRequestId);
+          const text = JSON.stringify(prRes);
+          return {
+            content: [{ type: "text", text }],
+          };
+        } catch (error) {
+          const message = (error as Error).message || "Failed to get pull request.";
+          return {
+            content: [{ type: "text", text: message }],
+            isError: true,
+          };
+        }
+      }
+    );
+  }
+
+  if (!disabledTools.has(REPO_TOOLS.get_azure_devops_changes_by_commit)) {
+    server.tool(
+      REPO_TOOLS.get_azure_devops_changes_by_commit,
+      "[Azure DevOps] Get a list of changes by a commit ID.",
+      {
+        repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
+        commitId: z.string().describe("The ID of the commit to retrieve."),
+      },
+      async ({ repositoryId, commitId }) => {
+        const connection = await connectionProvider();
+        const gitApi = await connection.getGitApi();
+        const changes = await gitApi.getChanges(commitId, repositoryId);
+        const text = changes ? JSON.stringify(toGitCommitChangesResult(changes)) : "No changes found.";
+        return {
+          content: [{ type: "text", text }],
+        };
+      }
+    );
+  }
+
+  if (!disabledTools.has(REPO_TOOLS.get_azure_devops_item_content_by_commit)) {
+    server.tool(
+      REPO_TOOLS.get_azure_devops_item_content_by_commit,
+      "[Azure DevOps] Get content of an item by commit ID.",
+      {
+        repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
+        commitId: z.string().describe("The ID of the commit."),
+        itemPath: z.string().describe("Item's path."),
+      },
+      async ({ repositoryId, commitId, itemPath }) => {
+        try {
+          const content = await getItemContentByCommit(connectionProvider, repositoryId, commitId, itemPath);
+          return {
+            content: [{ type: "text", text: JSON.stringify(content) }],
+          };
+        } catch (error) {
+          return {
+            content: [{ type: "text", text: `Error getting content for item ${itemPath} at commit ${commitId}: ${error instanceof Error ? error.message : String(error)}` }],
+            isError: true,
+          };
+        }
+      }
+    );
+  }
+
+  if (!disabledTools.has(REPO_TOOLS.get_azure_devops_content_by_objectid)) {
+    server.tool(
+      REPO_TOOLS.get_azure_devops_content_by_objectid,
+      "[Azure DevOps] Get item content directly by Git object ID (SHA-1 hash) for item with blob gitObjectType.",
+      {
+        repositoryId: z.string().describe("The ID of the repository."),
+        objectId: z.string().describe("The SHA-1 hash of the Git object (blob)."),
+      },
+      async ({ repositoryId, objectId }) => {
+        try {
+          const content = await getContentByObjectId(connectionProvider, repositoryId, objectId);
+          return {
+            content: [{ type: "text", text: content }],
+          };
+        } catch (error) {
+          return {
+            content: [{ type: "text", text: `Error getting content for object ${objectId}: ${error instanceof Error ? error.message : String(error)}` }],
+            isError: true,
+          };
+        }
+      }
+    );
+  }
+
+  if (!disabledTools.has(REPO_TOOLS.list_azure_devops_pull_request_threads)) {
+    server.tool(
+      REPO_TOOLS.list_azure_devops_pull_request_threads,
+      "[Azure DevOps] Retrieve a list of comment threads for a pull request.",
+      {
+        repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
+        pullRequestId: z.number().describe("The ID of the pull request for which to retrieve threads."),
+        project: z.string().optional().describe("Project ID or project name (optional)"),
+        iteration: z.number().optional().describe("The iteration ID for which to retrieve threads. Optional, defaults to the latest iteration."),
+        baseIteration: z.number().optional().describe("The base iteration ID for which to retrieve threads. Optional, defaults to the latest base iteration."),
+        top: z.number().default(100).describe("The maximum number of threads to return."),
+        skip: z.number().default(0).describe("The number of threads to skip."),
+      },
+      async ({ repositoryId, pullRequestId, project, iteration, baseIteration, top, skip }) => {
+        const connection = await connectionProvider();
+        const gitApi = await connection.getGitApi();
+
+        const threads = await gitApi.getThreads(repositoryId, pullRequestId, project, iteration, baseIteration);
+
+        const paginatedThreads = threads?.sort((a, b) => (a.id ?? 0) - (b.id ?? 0)).slice(skip, skip + top);
+
+        return {
+          content: [{ type: "text", text: JSON.stringify(paginatedThreads, null, 2) }],
+        };
+      }
+    );
+  }
+
+  if (!disabledTools.has(REPO_TOOLS.list_azure_devops_pull_request_comments_by_thread)) {
+    server.tool(
+      REPO_TOOLS.list_azure_devops_pull_request_comments_by_thread,
+      "[Azure DevOps] Retrieve a list of comments in a pull request thread.",
+      {
+        repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
+        pullRequestId: z.number().describe("The ID of the pull request for which to retrieve thread comments."),
+        threadId: z.number().describe("The ID of the thread for which to retrieve comments."),
+        project: z.string().optional().describe("Project ID or project name (optional)"),
+        top: z.number().default(100).describe("The maximum number of comments to return."),
+        skip: z.number().default(0).describe("The number of comments to skip."),
+      },
+      async ({ repositoryId, pullRequestId, threadId, project, top, skip }) => {
+        const connection = await connectionProvider();
+        const gitApi = await connection.getGitApi();
+
+        // Get thread comments - GitApi uses getComments for retrieving comments from a specific thread
+        const comments = await gitApi.getComments(repositoryId, pullRequestId, threadId, project);
+
+        const paginatedComments = comments?.sort((a, b) => (a.id ?? 0) - (b.id ?? 0)).slice(skip, skip + top);
+
+        return {
+          content: [{ type: "text", text: JSON.stringify(paginatedComments, null, 2) }],
+        };
+      }
+    );
+  }
+
   if (!disabledTools.has(REPO_TOOLS.create_pull_request)) {
     server.tool(
       REPO_TOOLS.create_pull_request,
@@ -307,34 +505,6 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<Acce
             content: [{ type: "text", text: `Reviewers with IDs ${reviewerIds.join(", ")} removed from pull request ${pullRequestId}.` }],
           };
         }
-      }
-    );
-  }
-
-  if (!disabledTools.has(REPO_TOOLS.list_repos_by_project)) {
-    server.tool(
-      REPO_TOOLS.list_repos_by_project,
-      "Retrieve a list of repositories for a given project",
-      {
-        project: z.string().describe("The name or ID of the Azure DevOps project."),
-        top: z.number().default(100).describe("The maximum number of repositories to return."),
-        skip: z.number().default(0).describe("The number of repositories to skip. Defaults to 0."),
-        repoNameFilter: z.string().optional().describe("Optional filter to search for repositories by name. If provided, only repositories with names containing this string will be returned."),
-      },
-      async ({ project, top, skip, repoNameFilter }) => {
-        const connection = await connectionProvider();
-        const gitApi = await connection.getGitApi();
-        const repositories = await gitApi.getRepositories(project, false, false, false);
-
-        const filteredRepositories = repoNameFilter ? filterReposByName(repositories, repoNameFilter) : repositories;
-
-        const paginatedRepositories = filteredRepositories?.sort((a, b) => a.name?.localeCompare(b.name ?? "") ?? 0).slice(skip, skip + top);
-
-        const repos = paginatedRepositories.map((repo) => toRepositoryResult(repo));
-
-        return {
-          content: [{ type: "text", text: JSON.stringify(repos) }],
-        };
       }
     );
   }
@@ -448,62 +618,6 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<Acce
     );
   }
 
-  if (!disabledTools.has(REPO_TOOLS.list_pull_request_threads)) {
-    server.tool(
-      REPO_TOOLS.list_pull_request_threads,
-      "Retrieve a list of comment threads for a pull request.",
-      {
-        repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
-        pullRequestId: z.number().describe("The ID of the pull request for which to retrieve threads."),
-        project: z.string().optional().describe("Project ID or project name (optional)"),
-        iteration: z.number().optional().describe("The iteration ID for which to retrieve threads. Optional, defaults to the latest iteration."),
-        baseIteration: z.number().optional().describe("The base iteration ID for which to retrieve threads. Optional, defaults to the latest base iteration."),
-        top: z.number().default(100).describe("The maximum number of threads to return."),
-        skip: z.number().default(0).describe("The number of threads to skip."),
-      },
-      async ({ repositoryId, pullRequestId, project, iteration, baseIteration, top, skip }) => {
-        const connection = await connectionProvider();
-        const gitApi = await connection.getGitApi();
-
-        const threads = await gitApi.getThreads(repositoryId, pullRequestId, project, iteration, baseIteration);
-
-        const paginatedThreads = threads?.sort((a, b) => (a.id ?? 0) - (b.id ?? 0)).slice(skip, skip + top);
-
-        return {
-          content: [{ type: "text", text: JSON.stringify(paginatedThreads, null, 2) }],
-        };
-      }
-    );
-  }
-
-  if (!disabledTools.has(REPO_TOOLS.list_pull_request_thread_comments)) {
-    server.tool(
-      REPO_TOOLS.list_pull_request_thread_comments,
-      "Retrieve a list of comments in a pull request thread.",
-      {
-        repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
-        pullRequestId: z.number().describe("The ID of the pull request for which to retrieve thread comments."),
-        threadId: z.number().describe("The ID of the thread for which to retrieve comments."),
-        project: z.string().optional().describe("Project ID or project name (optional)"),
-        top: z.number().default(100).describe("The maximum number of comments to return."),
-        skip: z.number().default(0).describe("The number of comments to skip."),
-      },
-      async ({ repositoryId, pullRequestId, threadId, project, top, skip }) => {
-        const connection = await connectionProvider();
-        const gitApi = await connection.getGitApi();
-
-        // Get thread comments - GitApi uses getComments for retrieving comments from a specific thread
-        const comments = await gitApi.getComments(repositoryId, pullRequestId, threadId, project);
-
-        const paginatedComments = comments?.sort((a, b) => (a.id ?? 0) - (b.id ?? 0)).slice(skip, skip + top);
-
-        return {
-          content: [{ type: "text", text: JSON.stringify(paginatedComments, null, 2) }],
-        };
-      }
-    );
-  }
-
   if (!disabledTools.has(REPO_TOOLS.list_branches_by_repo)) {
     server.tool(
       REPO_TOOLS.list_branches_by_repo,
@@ -548,34 +662,6 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<Acce
     );
   }
 
-  if (!disabledTools.has(REPO_TOOLS.get_repo_by_name_or_id)) {
-    server.tool(
-      REPO_TOOLS.get_repo_by_name_or_id,
-      "Get the repository by project and repository name or ID.",
-      {
-        project: z.string().describe("Project name or ID where the repository is located."),
-        repositoryNameOrId: z.string().describe("Repository name or ID."),
-      },
-      async ({ project, repositoryNameOrId }) => {
-        const connection = await connectionProvider();
-        const gitApi = await connection.getGitApi();
-        const repositories = await gitApi.getRepositories(project);
-
-        const repository = repositories?.find((repo) => repo.name === repositoryNameOrId || repo.id === repositoryNameOrId);
-
-        if (!repository) {
-          throw new Error(`Repository ${repositoryNameOrId} not found in project ${project}`);
-        }
-
-        const repoResult = toRepositoryResult(repository);
-
-        return {
-          content: [{ type: "text", text: JSON.stringify(repoResult) }],
-        };
-      }
-    );
-  }
-
   if (!disabledTools.has(REPO_TOOLS.get_branch_by_name)) {
     server.tool(
       REPO_TOOLS.get_branch_by_name,
@@ -601,93 +687,6 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<Acce
         }
         return {
           content: [{ type: "text", text: JSON.stringify(branch, null, 2) }],
-        };
-      }
-    );
-  }
-
-  if (!disabledTools.has(REPO_TOOLS.get_pull_request_by_id)) {
-    server.tool(
-      REPO_TOOLS.get_pull_request_by_id,
-      "Get a pull request by its ID.",
-      {
-        repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
-        pullRequestId: z.number().describe("The ID of the pull request to retrieve."),
-      },
-      async ({ repositoryId, pullRequestId }) => {
-        const connection = await connectionProvider();
-        const gitApi = await connection.getGitApi();
-        const pullRequest = await gitApi.getPullRequest(repositoryId, pullRequestId);
-        const text = pullRequest ? JSON.stringify(toPullRequestResult(pullRequest)) : "Pull request not found.";
-        return {
-          content: [{ type: "text", text }],
-        };
-      }
-    );
-  }
-
-  if (!disabledTools.has(REPO_TOOLS.get_pull_request_commits)) {
-    server.tool(
-      REPO_TOOLS.get_pull_request_commits,
-      "Get a list of commits by a pull request ID.",
-      {
-        repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
-        pullRequestId: z.number().describe("The ID of the pull request to retrieve."),
-      },
-      async ({ repositoryId, pullRequestId }) => {
-        const connection = await connectionProvider();
-        const gitApi = await connection.getGitApi();
-        const commits = await gitApi.getPullRequestCommits(repositoryId, pullRequestId);
-        const commitsResult = commits ? commits.map((commit) => toGitCommitResult(commit)) : [];
-        return {
-          content: [{ type: "text", text: JSON.stringify(commitsResult) }],
-        };
-      }
-    );
-  }
-
-  if (!disabledTools.has(REPO_TOOLS.get_changes_by_commit)) {
-    server.tool(
-      REPO_TOOLS.get_changes_by_commit,
-      "Get a list of changes by a commit ID.",
-      {
-        repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
-        commitId: z.string().describe("The ID of the commit to retrieve."),
-      },
-      async ({ repositoryId, commitId }) => {
-        const connection = await connectionProvider();
-        const gitApi = await connection.getGitApi();
-        const changes = await gitApi.getChanges(commitId, repositoryId);
-        const text = changes ? JSON.stringify(toGitCommitChangesResult(changes)) : "No changes found.";
-        return {
-          content: [{ type: "text", text }],
-        };
-      }
-    );
-  }
-
-  if (!disabledTools.has(REPO_TOOLS.get_item_content_by_commit)) {
-    server.tool(
-      REPO_TOOLS.get_item_content_by_commit,
-      "Get content of an item by commit ID.",
-      {
-        repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
-        commitId: z.string().describe("The ID of the commit."),
-        itemPath: z.string().describe("Item's path."),
-      },
-      async ({ repositoryId, commitId, itemPath }) => {
-        const connection = await connectionProvider();
-        const gitApi = await connection.getGitApi();
-
-        const itemVersion: GitVersionDescriptor = {
-          version: commitId,
-          versionType: GitVersionType["Commit"],
-        };
-
-        const stream = await gitApi.getItemContent(repositoryId, itemPath, undefined, undefined, undefined, true, undefined, false, itemVersion, true);
-        const content = await streamToString(stream);
-        return {
-          content: [{ type: "text", text: JSON.stringify(content) }],
         };
       }
     );
@@ -869,6 +868,79 @@ function streamToString(stream: NodeJS.ReadableStream): Promise<string> {
     stream.on("end", () => resolve(data));
     stream.on("error", reject);
   });
+}
+
+export async function getItemContentByCommit(connectionProvider: () => Promise<WebApi>, repositoryId: string, commitId: string, itemPath: string): Promise<string> {
+  const connection = await connectionProvider();
+  const gitApi = await connection.getGitApi();
+
+  const itemVersion: GitVersionDescriptor = {
+    version: commitId,
+    versionType: GitVersionType["Commit"],
+  };
+
+  const stream = await gitApi.getItemContent(repositoryId, itemPath, undefined, undefined, undefined, true, undefined, false, itemVersion, true);
+  return await streamToString(stream);
+}
+
+export async function getContentByObjectId(connectionProvider: () => Promise<WebApi>, repositoryId: string, objectId: string): Promise<string> {
+  const connection = await connectionProvider();
+  const gitApi = await connection.getGitApi();
+
+  const stream = await gitApi.getBlobContent(repositoryId, objectId);
+  return await streamToString(stream);
+}
+
+export async function getRepositoriesResult(connectionProvider: () => Promise<WebApi>, project: string, repositoryNameOrId?: string): Promise<RepositoryResult[]> {
+  const connection = await connectionProvider();
+  const gitApi = await connection.getGitApi();
+  const repositories = await gitApi.getRepositories(project);
+
+  const filter = repositoryNameOrId?.toLowerCase();
+  const repos = filter ? repositories?.filter((repo) => repo.name?.toLowerCase().includes(filter) || repo.id === filter) : repositories;
+  if (!repos || !repos.length) {
+    throw new Error(`Repository ${repositoryNameOrId} not found in project ${project}`);
+  }
+
+  return repos.map((repo) => toRepositoryResult(repo));
+}
+
+export async function getPullRequestResult(connectionProvider: () => Promise<WebApi>, repositoryId: string, pullRequestId: number): Promise<PullRequestResult> {
+  const connection = await connectionProvider();
+  const gitApi = await connection.getGitApi();
+  const pullRequest = await gitApi.getPullRequest(repositoryId, pullRequestId);
+  if (!pullRequest) {
+    throw new Error("Pull request not found.");
+  }
+
+  const prResult = toPullRequestResult(pullRequest);
+  const commits = await gitApi.getPullRequestCommits(repositoryId, pullRequestId);
+  prResult.commits = commits ? commits.map((commit) => toGitCommitResult(commit)) : [];
+
+  if (commits && commits.length) {
+    const latestCommitId = commits[0].commitId; // First commit is usually the latest
+    const targetBranch = pullRequest.targetRefName?.replace("refs/heads/", "") || "main";
+    const baseVersionDescriptor: GitBaseVersionDescriptor = {
+      version: targetBranch,
+      versionType: GitVersionType.Branch,
+    };
+    const targetVersionDescriptor: GitTargetVersionDescriptor = {
+      version: latestCommitId,
+      versionType: GitVersionType.Commit,
+    };
+
+    const diffs = await gitApi.getCommitDiffs(
+      repositoryId,
+      undefined,
+      false, // diffCommonCommit
+      100,
+      undefined,
+      baseVersionDescriptor,
+      targetVersionDescriptor
+    );
+    prResult.pullRequestChanges = diffs && toGitCommitDiffsResult(diffs);
+  }
+  return prResult;
 }
 
 export { REPO_TOOLS, configureRepoTools };
