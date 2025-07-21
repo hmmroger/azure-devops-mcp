@@ -2,9 +2,6 @@
 // Licensed under the MIT License.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { AccessToken } from "@azure/identity";
-import { WebApi } from "azure-devops-node-api";
-
 import { configureCoreTools, CORE_TOOLS } from "./tools/core.js";
 import { configureWorkTools, WORK_TOOLS } from "./tools/work.js";
 import { configureBuildTools, BUILD_TOOLS } from "./tools/builds.js";
@@ -14,6 +11,7 @@ import { configureReleaseTools, RELEASE_TOOLS } from "./tools/releases.js";
 import { configureWikiTools, WIKI_TOOLS } from "./tools/wiki.js";
 import { configureTestPlanTools, Test_Plan_Tools } from "./tools/testplans.js";
 import { configureSearchTools, SEARCH_TOOLS } from "./tools/search.js";
+import { AzureDevOpsClientManager } from "azure-client.js";
 
 const TOOLS_CATEGORY_MAP = new Map<string, object>([
   ["category_core", CORE_TOOLS],
@@ -40,7 +38,7 @@ const DEFAULT_ENABLED_TOOLS = [
   REPO_TOOLS.list_azure_devops_pull_request_comments_by_thread,
 ];
 
-async function configureAllTools(server: McpServer, tokenProvider: () => Promise<AccessToken>, connectionProvider: () => Promise<WebApi>, userAgentProvider: () => string) {
+async function configureAllTools(server: McpServer, adoManager: AzureDevOpsClientManager) {
   // disable all tools by default except DEFAULT_ENABLED_TOOLS and ADO_MCP_ENABLED_TOOLS
   const disabledTools = new Set<string>(
     Array.from(TOOLS_CATEGORY_MAP.values())
@@ -61,6 +59,10 @@ async function configureAllTools(server: McpServer, tokenProvider: () => Promise
       })
       .flatMap((tools) => tools)
   ).forEach((tool) => disabledTools.delete(tool));
+
+  const tokenProvider = () => adoManager.getToken();
+  const connectionProvider = adoManager.getClientFactory();
+  const userAgentProvider = () => adoManager.getUserAgent();
 
   configureCoreTools(server, tokenProvider, connectionProvider, disabledTools);
   configureWorkTools(server, tokenProvider, connectionProvider, disabledTools);
