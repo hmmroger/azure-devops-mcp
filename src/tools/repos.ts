@@ -49,7 +49,7 @@ export type PullRequestResult = Pick<
   closedBy?: IdentityResult;
   createdBy?: IdentityResult;
   reviewers?: IdentityWithVoteResult[];
-  pullRequestChanges?: GitCommitChangesResult;
+  changesFromAllCommits?: GitCommitChangesResult;
 };
 
 export type GitUserDateResult = Pick<GitUserDate, "email" | "date">;
@@ -932,13 +932,13 @@ export async function getPullRequestResult(connectionProvider: () => Promise<Web
     const diffs = await gitApi.getCommitDiffs(
       repositoryId,
       undefined,
-      false, // diffCommonCommit
+      true, // diffCommonCommit
       100,
       undefined,
       baseVersionDescriptor,
       targetVersionDescriptor
     );
-    prResult.pullRequestChanges = diffs && toGitCommitDiffsResult(diffs);
+    prResult.changesFromAllCommits = diffs && toGitCommitDiffsResult(diffs);
   }
   return prResult;
 }
