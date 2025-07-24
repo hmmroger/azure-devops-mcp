@@ -12,6 +12,7 @@ import { configureWikiTools, WIKI_TOOLS } from "./tools/wiki.js";
 import { configureTestPlanTools, Test_Plan_Tools } from "./tools/testplans.js";
 import { configureSearchTools, SEARCH_TOOLS } from "./tools/search.js";
 import { AzureDevOpsClientManager } from "azure-client.js";
+import { z } from "zod";
 
 const TOOLS_CATEGORY_MAP = new Map<string, object>([
   ["category_core", CORE_TOOLS],
@@ -64,6 +65,20 @@ async function configureAllTools(server: McpServer, adoManager: AzureDevOpsClien
   const connectionProvider = adoManager.getClientFactory();
   const userAgentProvider = () => adoManager.getUserAgent();
 
+  server.tool(
+    "change-azure-devops-org",
+    "[Azure DevOps] Change current Azure DevOps organization name.",
+    {
+      organization: z.string().describe("Azure DevOps organization name."),
+    },
+    async ({ organization }) => {
+      await adoManager.setOrgName(organization);
+      return {
+        content: [{ type: "text", text: `Organization set to: ${organization}` }],
+      };
+    }
+  );
+
   configureCoreTools(server, tokenProvider, connectionProvider, disabledTools);
   configureWorkTools(server, tokenProvider, connectionProvider, disabledTools);
   configureBuildTools(server, tokenProvider, connectionProvider, disabledTools);
@@ -72,7 +87,7 @@ async function configureAllTools(server: McpServer, adoManager: AzureDevOpsClien
   configureReleaseTools(server, tokenProvider, connectionProvider, disabledTools);
   configureWikiTools(server, tokenProvider, connectionProvider, disabledTools);
   configureTestPlanTools(server, tokenProvider, connectionProvider, disabledTools);
-  configureSearchTools(server, tokenProvider, connectionProvider, userAgentProvider, disabledTools);
+  configureSearchTools(server, adoManager, disabledTools);
 }
 
 export { configureAllTools };

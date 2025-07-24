@@ -1,16 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { AccessToken } from "@azure/identity";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { WebApi } from "azure-devops-node-api";
 import { IGitApi } from "azure-devops-node-api/GitApi.js";
 import { z } from "zod";
 import { validate } from "uuid";
 import { apiVersion } from "../utils.js";
-import { orgName } from "../index.js";
 import { VersionControlRecursionType } from "azure-devops-node-api/interfaces/GitInterfaces.js";
 import { GitItem } from "azure-devops-node-api/interfaces/GitInterfaces.js";
+import { AzureDevOpsClientManager } from "azure-client.js";
 
 export interface CodeSearchFilters {
   Project?: string[];
@@ -34,17 +32,10 @@ export const SEARCH_TOOLS = {
   search_azure_devops_workitem: "search_azure_devops_workitem",
 };
 
-export async function performCodeSearch(
-  searchRequest: CodeSearchRequest,
-  tokenProvider: () => Promise<AccessToken>,
-  connectionProvider: () => Promise<WebApi>,
-  userAgentProvider: () => string,
-  projectFilter?: string,
-  repoFilter?: string,
-  pathFilter?: string
-): Promise<string> {
-  const accessToken = await tokenProvider();
-  const connection = await connectionProvider();
+export async function performCodeSearch(searchRequest: CodeSearchRequest, adoManager: AzureDevOpsClientManager, projectFilter?: string, repoFilter?: string, pathFilter?: string): Promise<string> {
+  const accessToken = await adoManager.getToken();
+  const connection = await adoManager.getClient();
+  const orgName = await adoManager.getOrgName();
   const gitApi = await connection.getGitApi();
   const url = `https://almsearch.dev.azure.com/${orgName}/_apis/search/codesearchresults?api-version=${apiVersion}`;
 
@@ -70,12 +61,20 @@ export async function performCodeSearch(
     throw new Error(`Both project and repository filter are reuiqred when path filter is used.`);
   }
 
+  if (repoFilter || projectFilter || pathFilter) {
+    searchRequest.filters = {
+      Project: projectFilter ? [projectFilter] : undefined,
+      Repository: repoFilter ? [repoFilter] : undefined,
+      Path: pathFilter ? [pathFilter] : undefined,
+    };
+  }
+
   const response = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${accessToken.token}`,
-      "User-Agent": userAgentProvider(),
+      "User-Agent": adoManager.getUserAgent(),
     },
     body: JSON.stringify(searchRequest),
   });
@@ -94,13 +93,7 @@ export async function performCodeSearch(
   return resultText + JSON.stringify(combinedResults);
 }
 
-export function configureSearchTools(
-  server: McpServer,
-  tokenProvider: () => Promise<AccessToken>,
-  connectionProvider: () => Promise<WebApi>,
-  userAgentProvider: () => string,
-  disabledTools: Set<string>
-) {
+export function configureSearchTools(server: McpServer, adoManager: AzureDevOpsClientManager, disabledTools: Set<string>) {
   /**
    * CODE SEARCH
    * Get the code search results for a given search text.
@@ -119,7 +112,7 @@ export function configureSearchTools(
       },
       async ({ searchText, skip, top, projectName, repositoryName, path }) => {
         try {
-          const result = await performCodeSearch({ searchText, $skip: skip, $top: top }, tokenProvider, connectionProvider, userAgentProvider, projectName, repositoryName, path);
+          const result = await performCodeSearch({ searchText, $skip: skip, $top: top }, adoManager, projectName, repositoryName, path);
           return {
             content: [{ type: "text", text: result }],
           };
@@ -161,7 +154,9 @@ export function configureSearchTools(
           .strict(),
       },
       async ({ searchRequest }) => {
-        const accessToken = await tokenProvider();
+        const accessToken = await adoManager.getToken();
+        await adoManager.getClient(); // for org name check
+        const orgName = await adoManager.getOrgName();
         const url = `https://almsearch.dev.azure.com/${orgName}/_apis/search/wikisearchresults?api-version=${apiVersion}`;
 
         const response = await fetch(url, {
@@ -169,7 +164,7 @@ export function configureSearchTools(
           headers: {
             "Content-Type": "application/json",
             "Authorization": `Bearer ${accessToken.token}`,
-            "User-Agent": userAgentProvider(),
+            "User-Agent": adoManager.getUserAgent(),
           },
           body: JSON.stringify(searchRequest),
         });
@@ -215,7 +210,9 @@ export function configureSearchTools(
           .strict(),
       },
       async ({ searchRequest }) => {
-        const accessToken = await tokenProvider();
+        const accessToken = await adoManager.getToken();
+        await adoManager.getClient(); // for org name check
+        const orgName = await adoManager.getOrgName();
         const url = `https://almsearch.dev.azure.com/${orgName}/_apis/search/workitemsearchresults?api-version=${apiVersion}`;
 
         const response = await fetch(url, {
@@ -223,7 +220,7 @@ export function configureSearchTools(
           headers: {
             "Content-Type": "application/json",
             "Authorization": `Bearer ${accessToken.token}`,
-            "User-Agent": userAgentProvider(),
+            "User-Agent": adoManager.getUserAgent(),
           },
           body: JSON.stringify(searchRequest),
         });

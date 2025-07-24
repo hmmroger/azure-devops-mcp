@@ -11,14 +11,6 @@ import { UserAgentComposer } from "./useragent.js";
 import { packageVersion } from "./version.js";
 import { AzureDevOpsClientManager } from "./azure-client.js";
 
-const args = process.argv.slice(2);
-if (args.length === 0) {
-  console.error("Usage: mcp-server-azuredevops <organization_name>");
-  process.exit(1);
-}
-
-export const orgName = args[0];
-
 async function main() {
   const server = new McpServer({
     name: "Azure DevOps MCP Server",
@@ -30,7 +22,9 @@ async function main() {
     userAgentComposer.appendMcpClientInfo(server.server.getClientVersion());
   };
 
-  const azureClientManager = new AzureDevOpsClientManager(orgName, userAgentComposer, packageVersion);
+  const args = process.argv.slice(2);
+  const orgName = args.length > 0 ? args[0] : undefined;
+  const azureClientManager = new AzureDevOpsClientManager(userAgentComposer, packageVersion, orgName);
 
   configurePrompts(server);
 
