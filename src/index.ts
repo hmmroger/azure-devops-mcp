@@ -5,7 +5,6 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { configurePrompts } from "./prompts.js";
 import { configureAllTools } from "./tools.js";
 import { UserAgentComposer } from "./useragent.js";
 import { packageVersion } from "./version.js";
@@ -25,8 +24,6 @@ async function main() {
   const args = process.argv.slice(2);
   const orgName = args.length > 0 ? args[0] : undefined;
   const azureClientManager = new AzureDevOpsClientManager(userAgentComposer, packageVersion, orgName);
-
-  configurePrompts(server);
 
   await configureAllTools(server, azureClientManager);
 

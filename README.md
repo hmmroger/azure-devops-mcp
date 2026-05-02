@@ -6,14 +6,30 @@
 
 ## 🔧 Fork Changes
 
-Some tools have been redesigned for better compatibility across a variety of MCP clients, with improved parameter handling and enhanced client support. All tools are disabled by default except the ones defined in `DEFAULT_ENABLED_TOOLS`. You can use `ADO_MCP_ENABLED_TOOLS` env variable to enable tools. The value of `ADO_MCP_ENABLED_TOOLS` is string of comma separated tool names or category defined in `TOOLS_CATEGORY_MAP`.
+Tools have been redesigned for better compatibility across a variety of MCP clients, with improved parameter handling, structured text output, and reduced context usage.
 
- - **Enhanced naming conventions**: Tool names have better clarity
- - **Improved parameter structures**: Simplified parameter schemas that work better across different MCP client implementations
- - **Better error handling**: More consistent error responses and improved validation
- - **Enhanced search capabilities**: Streamlined code search with better filtering options
- - **Optimized tool organization**: Tools are better categorized and can be selectively enabled/disabled
- - **Client compatibility**: Designed to work seamlessly with various MCP client implementations beyond just VS Code
+### Enable / disable tools
+
+All tools are enabled by default. You can selectively disable tools or whole categories via env vars:
+
+- `ADO_MCP_DISABLED_TOOLS` — comma-separated list of tool names or category keys to **disable**.
+- `ADO_MCP_ENABLED_TOOLS` — comma-separated list applied **after** the deny-list to selectively re-enable. Useful for "disable an entire category except one tool".
+
+Category keys: `category_core`, `category_work`, `category_repo`, `category_workitem`, `category_wiki`, `category_search`.
+
+Example: `ADO_MCP_DISABLED_TOOLS=category_workitem` + `ADO_MCP_ENABLED_TOOLS=get_azure_devops_work_item` disables every work-item tool except `get_azure_devops_work_item`.
+
+### What changed
+
+- **Consistent tool naming**: All tools follow `<verb>_azure_devops_<entity>` (e.g. `list_azure_devops_projects`, `get_azure_devops_pull_request_by_id`). Names are stable and predictable.
+- **Structured text output instead of JSON dumps**: Each tool produces compact, agent-friendly text.
+- **HTML -> markdown conversion**: Rich-text fields (work item descriptions, PR comment bodies) are converted to markdown via `node-html-markdown` before output.
+- **Pagination metadata on every paginated list**: Self-describing top/skip + continuation-token variants where the API uses them (e.g. wiki pages).
+- **Strict ID inputs**: GUID-typed schema parameters (`projectId`, `repositoryId`, etc.) where ambiguity hurts (e.g. code search). Names are reserved for fields that can't have IDs.
+- **Diff support**: New `get_azure_devops_item_diff_by_commits` and `get_azure_devops_item_diff_by_object_ids` produce unified diffs locally with size guards.
+- **Wiki resolution chain**: `get_azure_devops_wiki_page` (by path) and `get_azure_devops_wiki_page_by_url` both resolve to a `pageId`, which `get_azure_devops_wiki_page_content` consumes — clear discovery flow.
+- **Org switching at runtime**: `change_azure_devops_org` and `get_azure_devops_org` let agents work across multiple ADO organizations in one session.
+- **Tools removed**: Builds, Releases, and Test Plans tools are not included in this fork.
 
 
 ## Original README
