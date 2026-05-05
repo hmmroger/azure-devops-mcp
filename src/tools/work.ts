@@ -7,7 +7,7 @@ import { WebApi } from "azure-devops-node-api";
 import { z, ZodRawShape } from "zod";
 import { TimeFrame, TeamSettingsIteration } from "azure-devops-node-api/interfaces/WorkInterfaces.js";
 import { TreeStructureGroup, WorkItemClassificationNode } from "azure-devops-node-api/interfaces/WorkItemTrackingInterfaces.js";
-import { getErrorToolResult, McpToolConfig, textToolResult, ToolHandler } from "../shared/tool-utils.js";
+import { getErrorToolResult, McpToolConfig, resolveProjectId, textToolResult, ToolHandler } from "../shared/tool-utils.js";
 
 const WORK_TOOLS = {
   list_azure_devops_team_iterations: "list_azure_devops_team_iterations",
@@ -145,6 +145,7 @@ function createIterations(connectionProvider: () => Promise<WebApi>) {
   const handler: ToolHandler<typeof inputSchema> = async ({ project, iterations }) => {
     try {
       const connection = await connectionProvider();
+      const projectId = await resolveProjectId(connection, project);
       const workItemTrackingApi = await connection.getWorkItemTrackingApi();
       const created: WorkItemClassificationNode[] = [];
 
@@ -157,7 +158,7 @@ function createIterations(connectionProvider: () => Promise<WebApi>) {
               finishDate: finishDate ? new Date(finishDate) : undefined,
             },
           },
-          project,
+          projectId,
           TreeStructureGroup.Iterations
         );
 
@@ -203,8 +204,9 @@ function assignIterationsToTeam(connectionProvider: () => Promise<WebApi>) {
   const handler: ToolHandler<typeof inputSchema> = async ({ project, team, iterations }) => {
     try {
       const connection = await connectionProvider();
+      const projectId = await resolveProjectId(connection, project);
       const workApi = await connection.getWorkApi();
-      const teamContext = { project, team };
+      const teamContext = { project: projectId, team };
       const assigned: TeamSettingsIteration[] = [];
 
       for (const { identifier, path } of iterations) {

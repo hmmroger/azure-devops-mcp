@@ -31,7 +31,7 @@ import { z, ZodRawShape } from "zod";
 import { IdentityRef } from "azure-devops-node-api/interfaces/common/VSSInterfaces.js";
 import { createTwoFilesPatch } from "diff";
 import { formatPagination, formatRepositoryLines, stripRefHeads } from "../shared/format-utils.js";
-import { getErrorToolResult, htmlToMarkdown, McpToolConfig, textToolResult, ToolHandler } from "../shared/tool-utils.js";
+import { getErrorToolResult, htmlToMarkdown, McpToolConfig, resolveProjectId, textToolResult, ToolHandler } from "../shared/tool-utils.js";
 import { getEnumKeys } from "../utils.js";
 
 const MAX_DIFF_INPUT_BYTES = 512 * 1024;
@@ -642,8 +642,9 @@ function replyToComment(connectionProvider: () => Promise<WebApi>) {
   const handler: ToolHandler<typeof inputSchema> = async ({ repositoryId, pullRequestId, threadId, content, project }) => {
     try {
       const connection = await connectionProvider();
+      const projectId = project ? await resolveProjectId(connection, project) : undefined;
       const gitApi = await connection.getGitApi();
-      const comment = await gitApi.createComment({ content }, repositoryId, pullRequestId, threadId, project);
+      const comment = await gitApi.createComment({ content }, repositoryId, pullRequestId, threadId, projectId);
 
       const header = `Reply added to PR #${pullRequestId} thread #${threadId} (comment id: ${comment.id}).`;
       return textToolResult([header, ...formatCommentBlock(comment)]);
@@ -775,12 +776,13 @@ function createPullRequestThread(connectionProvider: () => Promise<WebApi>) {
       }
 
       const connection = await connectionProvider();
+      const projectId = project ? await resolveProjectId(connection, project) : undefined;
       const gitApi = await connection.getGitApi();
       const thread = await gitApi.createThread(
         { comments: [{ content }], threadContext, status: CommentThreadStatus[status as keyof typeof CommentThreadStatus] },
         repositoryId,
         pullRequestId,
-        project
+        projectId
       );
 
       const header = `Thread #${thread.id} created in PR #${pullRequestId}.`;

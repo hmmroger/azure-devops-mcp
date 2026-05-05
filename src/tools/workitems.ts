@@ -19,7 +19,7 @@ import {
   WorkItemType,
 } from "azure-devops-node-api/interfaces/WorkItemTrackingInterfaces.js";
 import { BacklogLevelConfiguration, BacklogLevelWorkItems, BacklogType, IterationWorkItems, PredefinedQuery } from "azure-devops-node-api/interfaces/WorkInterfaces.js";
-import { getErrorToolResult, htmlToMarkdown, McpToolConfig, textToolResult, ToolHandler } from "../shared/tool-utils.js";
+import { getErrorToolResult, htmlToMarkdown, McpToolConfig, resolveProjectId, textToolResult, ToolHandler } from "../shared/tool-utils.js";
 import { batchApiVersion } from "../utils.js";
 
 const WORKITEM_TOOLS = {
@@ -739,6 +739,7 @@ function createWorkItem(connectionProvider: () => Promise<WebApi>) {
   const handler: ToolHandler<typeof inputSchema> = async ({ project, workItemType, fields }) => {
     try {
       const connection = await connectionProvider();
+      const projectId = await resolveProjectId(connection, project);
       const workItemApi = await connection.getWorkItemTrackingApi();
 
       const document: { op: string; path: string; value: string }[] = fields.map(({ name, value }) => ({
@@ -753,7 +754,7 @@ function createWorkItem(connectionProvider: () => Promise<WebApi>) {
         }
       }
 
-      const created = await workItemApi.createWorkItem(null, document, project, workItemType);
+      const created = await workItemApi.createWorkItem(null, document, projectId, workItemType);
 
       if (!created) {
         return textToolResult([`Failed to create work item of type '${workItemType}' in project '${project}'.`], true);
@@ -856,8 +857,9 @@ function addWorkItemComment(connectionProvider: () => Promise<WebApi>) {
   const handler: ToolHandler<typeof inputSchema> = async ({ project, workItemId, comment }) => {
     try {
       const connection = await connectionProvider();
+      const projectId = await resolveProjectId(connection, project);
       const workItemApi = await connection.getWorkItemTrackingApi();
-      const created: Comment = await workItemApi.addComment({ text: comment }, project, workItemId);
+      const created: Comment = await workItemApi.addComment({ text: comment }, projectId, workItemId);
 
       if (!created) {
         return textToolResult([`Failed to add comment to work item #${workItemId}.`], true);
@@ -903,6 +905,7 @@ function addChildWorkItems(tokenProvider: () => Promise<AccessToken>, connection
       }
 
       const connection = await connectionProvider();
+      const projectId = await resolveProjectId(connection, project);
       const accessToken = await tokenProvider();
 
       const body = items.map((item, index) => {
@@ -916,7 +919,7 @@ function addChildWorkItems(tokenProvider: () => Promise<AccessToken>, connection
             path: "/relations/-",
             value: {
               rel: "System.LinkTypes.Hierarchy-Reverse",
-              url: `${connection.serverUrl}/${project}/_apis/wit/workItems/${parentId}`,
+              url: `${connection.serverUrl}/${projectId}/_apis/wit/workItems/${parentId}`,
             },
           },
         ];
@@ -934,7 +937,7 @@ function addChildWorkItems(tokenProvider: () => Promise<AccessToken>, connection
 
         return {
           method: "PATCH",
-          uri: `/${project}/_apis/wit/workitems/$${workItemType}?api-version=${batchApiVersion}`,
+          uri: `/${projectId}/_apis/wit/workitems/$${workItemType}?api-version=${batchApiVersion}`,
           headers: { "Content-Type": "application/json-patch+json" },
           body: ops,
         };
@@ -969,9 +972,10 @@ function linkWorkItemToPullRequest(connectionProvider: () => Promise<WebApi>) {
   const handler: ToolHandler<typeof inputSchema> = async ({ project, repositoryId, pullRequestId, workItemId }) => {
     try {
       const connection = await connectionProvider();
+      const projectId = await resolveProjectId(connection, project);
       const workItemTrackingApi = await connection.getWorkItemTrackingApi();
 
-      const artifactPathValue = `${project}/${repositoryId}/${pullRequestId}`;
+      const artifactPathValue = `${projectId}/${repositoryId}/${pullRequestId}`;
       const vstfsUrl = `vstfs:///Git/PullRequestId/${encodeURIComponent(artifactPathValue)}`;
       const patchDocument = [
         {
@@ -985,7 +989,7 @@ function linkWorkItemToPullRequest(connectionProvider: () => Promise<WebApi>) {
         },
       ];
 
-      const updated = await workItemTrackingApi.updateWorkItem({}, patchDocument, workItemId, project);
+      const updated = await workItemTrackingApi.updateWorkItem({}, patchDocument, workItemId, projectId);
       if (!updated) {
         return textToolResult([`Failed to link work item #${workItemId} to pull request #${pullRequestId}.`], true);
       }
@@ -1178,6 +1182,7 @@ function linkWorkItemsBatch(tokenProvider: () => Promise<AccessToken>, connectio
   const handler: ToolHandler<typeof inputSchema> = async ({ project, updates }) => {
     try {
       const connection = await connectionProvider();
+      const projectId = await resolveProjectId(connection, project);
       const accessToken = await tokenProvider();
       const orgUrl = connection.serverUrl;
 
@@ -1193,7 +1198,7 @@ function linkWorkItemsBatch(tokenProvider: () => Promise<AccessToken>, connectio
             path: "/relations/-",
             value: {
               rel: getLinkTypeRefName((type ?? "related") as LinkTypeName),
-              url: `${orgUrl}/${project}/_apis/wit/workItems/${linkToId}`,
+              url: `${orgUrl}/${projectId}/_apis/wit/workItems/${linkToId}`,
               attributes: { comment: comment ?? "" },
             },
           })),
@@ -1228,6 +1233,7 @@ function closeAndLinkWorkItemDuplicates(tokenProvider: () => Promise<AccessToken
     try {
       const effectiveState = state ?? "Removed";
       const connection = await connectionProvider();
+      const projectId = await resolveProjectId(connection, project);
       const accessToken = await tokenProvider();
 
       const body = duplicateIds.map((duplicateId) => ({
@@ -1241,7 +1247,7 @@ function closeAndLinkWorkItemDuplicates(tokenProvider: () => Promise<AccessToken
             path: "/relations/-",
             value: {
               rel: "System.LinkTypes.Duplicate-Reverse",
-              url: `${connection.serverUrl}/${project}/_apis/wit/workItems/${id}`,
+              url: `${connection.serverUrl}/${projectId}/_apis/wit/workItems/${id}`,
             },
           },
         ],

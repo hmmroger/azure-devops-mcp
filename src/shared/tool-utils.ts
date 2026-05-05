@@ -4,6 +4,7 @@ import type { Visitor } from "node-html-markdown/dist/visitor.js";
 import { ShapeOutput } from "@modelcontextprotocol/sdk/server/zod-compat";
 import { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/types";
 import { NodeHtmlMarkdown } from "node-html-markdown";
+import { WebApi } from "azure-devops-node-api";
 import type { ZodRawShape } from "zod";
 
 const MIN_TABLE_SEPARATOR_COUNT = 3;
@@ -24,6 +25,52 @@ export interface McpToolConfig<InputArgs extends ZodRawShape> {
   annotations?: ToolAnnotations;
   handler: ToolHandler<InputArgs>;
 }
+
+const GUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export const isGuid = (value: string): boolean => GUID_REGEX.test(value);
+
+const projectIdCache = new Map<string, string>();
+
+const getOrgFromServerUrl = (serverUrl: string): string => {
+  try {
+    return new URL(serverUrl).pathname.replace(/^\/+|\/+$/g, "");
+  } catch {
+    return serverUrl;
+  }
+};
+
+/**
+ * Resolves a project name or ID to its GUID. Short-circuits when the input is already
+ * a GUID; otherwise calls the Core API and memoizes by `{org}-{name}` so subsequent
+ * calls in the same process are free. The org is derived from `connection.serverUrl`,
+ * so switching orgs naturally produces a fresh cache namespace.
+ *
+ * Use this in write paths (POST/PATCH) before passing `project` to the SDK. The
+ * underlying typed-rest-client follows ADO's name → ID redirect on POST as a GET,
+ * which drops the body and surfaces as a silent 404.
+ */
+export const resolveProjectId = async (connection: WebApi, project: string): Promise<string> => {
+  if (isGuid(project)) {
+    return project;
+  }
+
+  const org = getOrgFromServerUrl(connection.serverUrl);
+  const cacheKey = `${org}-${project}`;
+  const cached = projectIdCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const coreApi = await connection.getCoreApi();
+  const found = await coreApi.getProject(project);
+  if (!found?.id) {
+    throw new Error(`Project '${project}' not found.`);
+  }
+
+  projectIdCache.set(cacheKey, found.id);
+  return found.id;
+};
 
 /**
  * Creates a tool result object with text content.
@@ -53,9 +100,24 @@ export const textToolResult = (texts: string[], isError?: boolean) => {
  * @returns Error tool result object with isError flag set to true
  */
 export const getErrorToolResult = (error: unknown, fallbackMessage: string) => {
-  const exceptionError = (error as Error).message;
-  const errorMessage = exceptionError ? exceptionError : fallbackMessage;
-  return textToolResult([errorMessage], true);
+  const err = error as {
+    message?: string;
+    statusCode?: number;
+    result?: { message?: string; value?: { Message?: string } };
+  };
+
+  const baseMessage = err?.message || fallbackMessage;
+  const lines: string[] = [baseMessage];
+  if (typeof err?.statusCode === "number") {
+    lines.push(`Status code: ${err.statusCode}`);
+  }
+
+  const innerMessage = err?.result?.message ?? err?.result?.value?.Message;
+  if (innerMessage && innerMessage !== baseMessage) {
+    lines.push(`Details: ${innerMessage}`);
+  }
+
+  return textToolResult(lines, true);
 };
 
 /**

@@ -6,7 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebApi } from "azure-devops-node-api";
 import { z, ZodRawShape } from "zod";
 import { WikiPage, WikiPageDetail, WikiPagesBatchRequest, WikiType, WikiV2 } from "azure-devops-node-api/interfaces/WikiInterfaces.js";
-import { getErrorToolResult, McpToolConfig, textToolResult, ToolHandler } from "../shared/tool-utils.js";
+import { getErrorToolResult, McpToolConfig, resolveProjectId, textToolResult, ToolHandler } from "../shared/tool-utils.js";
 import { apiVersion } from "../utils.js";
 
 const WIKI_TOOLS = {
@@ -434,8 +434,8 @@ function createOrUpdateWikiPage(tokenProvider: () => Promise<AccessToken>, conne
       const normalizedPath = path.startsWith("/") ? path : `/${path}`;
       const encodedPath = encodeURIComponent(normalizedPath);
       const baseUrl = connection.serverUrl;
-      const projectParam = project ?? "";
-      const url = `${baseUrl}/${encodeURIComponent(projectParam)}/_apis/wiki/wikis/${encodeURIComponent(wikiIdentifier)}/pages?path=${encodedPath}&versionDescriptor.versionType=branch&versionDescriptor.version=${encodeURIComponent(effectiveBranch)}&api-version=${apiVersion}`;
+      const projectSegment = project ? await resolveProjectId(connection, project) : "";
+      const url = `${baseUrl}/${encodeURIComponent(projectSegment)}/_apis/wiki/wikis/${encodeURIComponent(wikiIdentifier)}/pages?path=${encodedPath}&versionDescriptor.versionType=branch&versionDescriptor.version=${encodeURIComponent(effectiveBranch)}&api-version=${apiVersion}`;
       const userAgent = userAgentProvider();
 
       const createResponse = await fetch(url, {
