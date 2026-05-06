@@ -338,6 +338,7 @@ function formatPullRequestLines(pr: PullRequestResult): string[] {
     const completeness = diffs?.allChangesIncluded === false ? " (truncated)" : "";
     const range = `, ${stripRefHeads(pr.sourceRefName ?? "")} -> ${stripRefHeads(pr.targetRefName ?? "")}`;
     lines.push("", `Changed Items (${changes.length}${completeness}${range}):`, ...changes.filter((change) => !change.item?.isFolder).map((c) => `  ${formatChangeLine(c)}`));
+    lines.push("", "Note: these are the full changesFromAllCommits set. Pass Object ID and Original Object ID to get_azure_devops_item_diff_by_object_ids for per-file diffs.");
   }
 
   return lines;
