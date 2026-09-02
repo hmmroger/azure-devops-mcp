@@ -132,6 +132,55 @@ export const htmlToMarkdown = (html: string | undefined | null): string => {
   return htmlToMarkdownConverter.translate(html);
 };
 
+/**
+ * Renders text content as line-paginated tool output with a metadata header.
+ * Lines are 1-indexed and prefixed with `[LNNN]` markers so agents can request
+ * follow-up ranges via `startLine`.
+ */
+export interface FormatContentLinesOptions {
+  metadata?: string[];
+  startLine: number;
+  limit: number;
+  emptyMessage?: string;
+}
+
+export const formatContentLines = (content: string, options: FormatContentLinesOptions): string[] => {
+  const { metadata, startLine, limit, emptyMessage } = options;
+  const allLines = content.split(/\r?\n/);
+  if (allLines.length > 0 && allLines[allLines.length - 1] === "" && /\r?\n$/.test(content)) {
+    allLines.pop();
+  }
+
+  const totalLines = allLines.length;
+  const headerParts = [`--- METADATA ---`];
+  if (metadata && metadata.length > 0) {
+    headerParts.push(`[${metadata.join(" | ")}]`);
+  }
+  headerParts.push(`[Total Lines: ${totalLines}]`);
+
+  if (totalLines === 0 || (totalLines === 1 && allLines[0] === "")) {
+    return headerParts.concat(emptyMessage ?? `Content is empty.`);
+  }
+
+  if (startLine > totalLines) {
+    return headerParts.concat(`startLine ${startLine} exceeds total (${totalLines} lines).`);
+  }
+
+  const startIdx = startLine - 1;
+  const endIdx = Math.min(startIdx + limit, totalLines);
+  const sliced = allLines.slice(startIdx, endIdx);
+
+  headerParts.push("Lines are prefixed with [LNNN] markers. These markers are NOT part of the note content.");
+  if (endIdx < totalLines) {
+    headerParts.push(`More lines available, set startLine=${endIdx + 1} to continue`);
+  }
+
+  headerParts.push("", `--- CONTENT (lines ${startLine} - ${endIdx})`);
+
+  const contentParts = sliced.map((line, index) => `[L${startIdx + index + 1}] ${line}`);
+  return headerParts.concat(contentParts);
+};
+
 function getTableCustomTranslator(maxSeparatorCount?: number): TranslatorConfigObject {
   maxSeparatorCount = maxSeparatorCount ?? MIN_TABLE_SEPARATOR_COUNT;
   // max separator count can't be smaller than min

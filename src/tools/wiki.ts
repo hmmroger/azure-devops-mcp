@@ -6,7 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebApi } from "azure-devops-node-api";
 import { z, ZodRawShape } from "zod";
 import { WikiPage, WikiPageDetail, WikiPagesBatchRequest, WikiType, WikiV2 } from "azure-devops-node-api/interfaces/WikiInterfaces.js";
-import { getErrorToolResult, McpToolConfig, resolveProjectId, textToolResult, ToolHandler } from "../shared/tool-utils.js";
+import { formatContentLines, getErrorToolResult, McpToolConfig, resolveProjectId, textToolResult, ToolHandler } from "../shared/tool-utils.js";
 import { apiVersion } from "../utils.js";
 
 const WIKI_TOOLS = {
@@ -168,6 +168,15 @@ function formatWikiPageLines(page: WikiPage, recursionLevel?: string): string[] 
   return lines;
 }
 
+function formatWikiContentLines(content: string, options: { wikiIdentifier: string; path?: string; pageId?: number; startLine: number; limit: number }): string[] {
+  const { wikiIdentifier, path, pageId, startLine, limit } = options;
+  const metadata: string[] = [`Wiki: ${wikiIdentifier}`];
+  if (path) metadata.push(`Path: ${path}`);
+  if (pageId !== undefined) metadata.push(`Page ID: ${pageId}`);
+
+  return formatContentLines(content, { metadata, startLine, limit, emptyMessage: "Wiki page is empty." });
+}
+
 function formatTokenPagination(returned: number, top: number, continuationToken: string | undefined): string {
   const more = continuationToken ? `yes (continuationToken=${continuationToken})` : "no";
   return `[Returned: ${returned} | Top: ${top} | More: ${more}]`;
@@ -220,7 +229,7 @@ export function configureWikiTools(
   wikiTools.push(listWikiPages(tokenProvider, connectionProvider, userAgentProvider));
   wikiTools.push(getWikiPage(tokenProvider, connectionProvider, userAgentProvider));
   wikiTools.push(getWikiPageByUrl(tokenProvider, connectionProvider, userAgentProvider));
-  wikiTools.push(getWikiPageContent(connectionProvider));
+  wikiTools.push(getWikiPageContent(tokenProvider, connectionProvider, userAgentProvider));
   wikiTools.push(createOrUpdateWikiPage(tokenProvider, connectionProvider, userAgentProvider));
   return wikiTools as unknown as McpToolConfig<ZodRawShape>[];
 }
@@ -382,25 +391,74 @@ function getWikiPage(tokenProvider: () => Promise<AccessToken>, connectionProvid
   return config;
 }
 
-function getWikiPageContent(connectionProvider: () => Promise<WebApi>) {
+function getWikiPageContent(tokenProvider: () => Promise<AccessToken>, connectionProvider: () => Promise<WebApi>, userAgentProvider: () => string) {
   const inputSchema = {
     wikiIdentifier: z.string().describe("The unique identifier or name of the wiki."),
     project: z.string().describe("Project name or ID where the wiki is located."),
-    pageId: z.number().describe("Numeric page ID. Obtain via 'list_azure_devops_wiki_pages' or 'get_azure_devops_wiki_page'."),
+    path: z.string().optional().describe("Path of the wiki page (e.g. '/Home' or '/Documentation/Setup'). Preferred: works for every page, including pages without a numeric ID."),
+    pageId: z.number().optional().describe("Numeric page ID. Only supply when 'path' is unknown; not every page exposes an ID."),
+    startLine: z.number().optional().describe("1-indexed line number to start reading from. Default: 1."),
+    limit: z.number().optional().describe("Maximum number of lines to return starting from startLine. Default: 500"),
   };
-  const handler: ToolHandler<typeof inputSchema> = async ({ wikiIdentifier, project, pageId }) => {
+  const handler: ToolHandler<typeof inputSchema> = async ({ wikiIdentifier, project, path, pageId, startLine, limit }) => {
     try {
+      if (!path && pageId === undefined) {
+        return textToolResult(["Provide either 'path' or 'pageId' to fetch wiki page content."], true);
+      }
+
       const connection = await connectionProvider();
+      const effectiveStartLine = startLine || 1;
+      const effectiveLimit = limit || 500;
+
+      if (path) {
+        const accessToken = await tokenProvider();
+        const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+        const baseUrl = connection.serverUrl.replace(/\/$/, "");
+        const params = new URLSearchParams({
+          "path": normalizedPath,
+          "includeContent": "true",
+          "recursionLevel": "None",
+          "api-version": apiVersion,
+        });
+
+        const url = `${baseUrl}/${encodeURIComponent(project)}/_apis/wiki/wikis/${encodeURIComponent(wikiIdentifier)}/pages?${params.toString()}`;
+        const response = await fetch(url, {
+          headers: {
+            "Authorization": `Bearer ${accessToken.token}`,
+            "User-Agent": userAgentProvider(),
+          },
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Failed to get wiki page content (${response.status}): ${errorText}`);
+        }
+
+        const page = (await response.json()) as WikiPage;
+        if (page.content === undefined || page.content === null) {
+          return textToolResult([`No content returned for page '${normalizedPath}' in wiki '${wikiIdentifier}'.`], true);
+        }
+
+        return textToolResult(
+          formatWikiContentLines(page.content, {
+            wikiIdentifier,
+            path: page.path ?? normalizedPath,
+            pageId: page.id,
+            startLine: effectiveStartLine,
+            limit: effectiveLimit,
+          })
+        );
+      }
+
       const wikiApi = await connection.getWikiApi();
-      const stream = await wikiApi.getPageByIdText(project, wikiIdentifier, pageId, undefined, true);
+      const stream = await wikiApi.getPageByIdText(project, wikiIdentifier, pageId!, undefined, true);
 
       if (!stream) {
         return textToolResult([`No content returned for page ID ${pageId} in wiki '${wikiIdentifier}'.`], true);
       }
 
       const content = await streamToString(stream);
-      const header = `Wiki page content (wiki: ${wikiIdentifier}, pageId: ${pageId}):`;
-      return textToolResult([header, content]);
+      return textToolResult(formatWikiContentLines(content, { wikiIdentifier, pageId, startLine: effectiveStartLine, limit: effectiveLimit }));
     } catch (error) {
       return getErrorToolResult(error, "Failed to fetch wiki page content.");
     }
@@ -408,7 +466,8 @@ function getWikiPageContent(connectionProvider: () => Promise<WebApi>) {
 
   const config: McpToolConfig<typeof inputSchema> = {
     name: WIKI_TOOLS.get_azure_devops_wiki_page_content,
-    description: "Get wiki page markdown content by page ID. Use 'get_azure_devops_wiki_page' (by path) or 'list_azure_devops_wiki_pages' to discover the ID.",
+    description:
+      "Get wiki page markdown content by path (preferred) or by numeric page ID. Prefer 'path' since pages created in the Azure DevOps UI may not expose a numeric ID. Paginated by line; use startLine/limit to page through large pages.",
     inputSchema,
     handler,
   };
@@ -566,7 +625,7 @@ function getWikiPageByUrl(tokenProvider: () => Promise<AccessToken>, connectionP
 
   const config: McpToolConfig<typeof inputSchema> = {
     name: WIKI_TOOLS.get_azure_devops_wiki_page_by_url,
-    description: "Resolve an Azure DevOps wiki page URL to page metadata. Use the returned page ID with 'get_azure_devops_wiki_page_content' to fetch markdown.",
+    description: "Resolve an Azure DevOps wiki page URL to page metadata. Use the returned page path (or ID) with 'get_azure_devops_wiki_page_content' to fetch markdown.",
     inputSchema,
     handler,
   };

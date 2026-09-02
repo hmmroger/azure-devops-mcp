@@ -27,7 +27,7 @@ Example: `ADO_MCP_DISABLED_TOOLS=category_workitem` + `ADO_MCP_ENABLED_TOOLS=get
 - **Pagination metadata on every paginated list**: Self-describing top/skip + continuation-token variants where the API uses them (e.g. wiki pages).
 - **Strict ID inputs**: GUID-typed schema parameters (`projectId`, `repositoryId`, etc.) where ambiguity hurts (e.g. code search). Names are reserved for fields that can't have IDs.
 - **Diff support**: New `get_azure_devops_item_diff_by_commits` and `get_azure_devops_item_diff_by_object_ids` produce unified diffs locally with size guards.
-- **Wiki resolution chain**: `get_azure_devops_wiki_page` (by path) and `get_azure_devops_wiki_page_by_url` both resolve to a `pageId`, which `get_azure_devops_wiki_page_content` consumes — clear discovery flow.
+- **Wiki resolution chain**: `get_azure_devops_wiki_page` (by path) and `get_azure_devops_wiki_page_by_url` both resolve to a page path (and a `pageId` when one exists), either of which `get_azure_devops_wiki_page_content` accepts — path is preferred because pages created in the Azure DevOps UI may have no numeric ID. Page content is line-paginated (`startLine`/`limit`) with `[LNNN]` markers, matching the repo item-content tools.
 - **Org switching at runtime**: `change_azure_devops_org` and `get_azure_devops_org` let agents work across multiple ADO organizations in one session.
 - **Tools removed**: Builds, Releases, and Test Plans tools are not included in this fork.
 

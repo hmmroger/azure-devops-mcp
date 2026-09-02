@@ -31,7 +31,7 @@ import { z, ZodRawShape } from "zod";
 import { IdentityRef } from "azure-devops-node-api/interfaces/common/VSSInterfaces.js";
 import { createTwoFilesPatch } from "diff";
 import { formatPagination, formatRepositoryLines, stripRefHeads } from "../shared/format-utils.js";
-import { getErrorToolResult, htmlToMarkdown, McpToolConfig, resolveProjectId, textToolResult, ToolHandler } from "../shared/tool-utils.js";
+import { formatContentLines, getErrorToolResult, htmlToMarkdown, McpToolConfig, resolveProjectId, textToolResult, ToolHandler } from "../shared/tool-utils.js";
 import { getEnumKeys } from "../utils.js";
 
 const MAX_DIFF_INPUT_BYTES = 512 * 1024;
@@ -258,39 +258,12 @@ interface FormatItemContentLinesOptions {
 
 function formatItemContentLines(content: string, options: FormatItemContentLinesOptions): string[] {
   const { itemPath, commitId, objectId, startLine, limit } = options;
-  const allLines = content.split(/\r?\n/);
-  if (allLines.length > 0 && allLines[allLines.length - 1] === "" && /\r?\n$/.test(content)) {
-    allLines.pop();
-  }
+  const metadata: string[] = [];
+  if (itemPath) metadata.push(`Path: ${itemPath}`);
+  if (commitId) metadata.push(`Commit ID: ${commitId}`);
+  if (objectId) metadata.push(`Object ID: ${objectId}`);
 
-  const totalLines = allLines.length;
-  const metadataParts: string[] = [];
-  if (itemPath) metadataParts.push(`Path: ${itemPath}`);
-  if (commitId) metadataParts.push(`Commit ID: ${commitId}`);
-  if (objectId) metadataParts.push(`Object ID: ${objectId}`);
-  const headerParts = [`--- METADATA ---`, `[${metadataParts.join(" | ")}]`, `[Total Lines: ${totalLines}]`];
-
-  if (totalLines === 0) {
-    return headerParts.concat(`File is empty.`);
-  }
-
-  if (startLine > totalLines) {
-    return headerParts.concat(`startLine ${startLine} exceeds total (${totalLines} lines).`);
-  }
-
-  const startIdx = startLine - 1;
-  const endIdx = Math.min(startIdx + limit, totalLines);
-  const sliced = allLines.slice(startIdx, endIdx);
-
-  headerParts.push("Lines are prefixed with [LNNN] markers. These markers are NOT part of the note content.");
-  if (endIdx < totalLines) {
-    headerParts.push(`More lines available, set startLine=${endIdx + 1} to continue`);
-  }
-
-  headerParts.push("", `--- CONTENT (lines ${startLine} - ${endIdx})`);
-
-  const contentParts = sliced.map((line, index) => `[L${startIdx + index + 1}] ${line}`);
-  return headerParts.concat(contentParts);
+  return formatContentLines(content, { metadata, startLine, limit, emptyMessage: "File is empty." });
 }
 
 function formatPullRequestLines(pr: PullRequestResult): string[] {
