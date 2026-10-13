@@ -722,6 +722,38 @@ function updateWorkItem(connectionProvider: () => Promise<WebApi>) {
   return config;
 }
 
+// Azure DevOps only accepts '/multilineFieldsFormat/<field>' for large-text (HTML) fields.
+// Sending it for any other field type (e.g. System.AreaPath, System.Title, System.Tags) fails the request.
+const LARGE_TEXT_FIELDS = new Set(
+  [
+    "System.Description",
+    "System.History",
+    "Microsoft.VSTS.Common.AcceptanceCriteria",
+    "Microsoft.VSTS.Common.ReviewedBy",
+    "Microsoft.VSTS.TCM.ReproSteps",
+    "Microsoft.VSTS.TCM.SystemInfo",
+    "Microsoft.VSTS.CMMI.Analysis",
+    "Microsoft.VSTS.CMMI.CorrectiveActionPlan",
+    "Microsoft.VSTS.CMMI.CorrectiveActionActualResolution",
+    "Microsoft.VSTS.CMMI.ContingencyPlan",
+    "Microsoft.VSTS.CMMI.MitigationPlan",
+    "Microsoft.VSTS.CMMI.Justification",
+    "Microsoft.VSTS.CMMI.ImpactOnArchitecture",
+    "Microsoft.VSTS.CMMI.ImpactOnDevelopment",
+    "Microsoft.VSTS.CMMI.ImpactOnTechnicalPublications",
+    "Microsoft.VSTS.CMMI.ImpactOnTest",
+    "Microsoft.VSTS.CMMI.ImpactOnUserExperience",
+    "Microsoft.VSTS.CMMI.ProposedFix",
+    "Microsoft.VSTS.CMMI.RequiresReview",
+    "Microsoft.VSTS.CMMI.TargetResolveDate",
+  ].map((f) => f.toLowerCase())
+);
+
+function isLargeTextField(fieldReferenceName: string): boolean {
+  const name = fieldReferenceName.replace(/^\/?fields\//i, "").toLowerCase();
+  return LARGE_TEXT_FIELDS.has(name) || /(description|steps|criteria|notes|comments|plan|analysis|justification)$/.test(name);
+}
+
 function createWorkItem(connectionProvider: () => Promise<WebApi>) {
   const inputSchema = {
     project: z.string().describe("The name or ID of the Azure DevOps project."),
@@ -731,7 +763,7 @@ function createWorkItem(connectionProvider: () => Promise<WebApi>) {
         z.object({
           name: z.string().describe("Field reference name, e.g. 'System.Title'."),
           value: z.string().describe("Field value."),
-          format: z.enum(["Html", "Markdown"]).optional().describe("Format for large text fields. Defaults to 'Markdown'."),
+          format: z.enum(["Html", "Markdown"]).optional().describe("Format for large text fields such as System.Description. Ignored for other field types. Defaults to 'Markdown'."),
         })
       )
       .describe("Fields to set on the new work item."),
@@ -748,8 +780,8 @@ function createWorkItem(connectionProvider: () => Promise<WebApi>) {
         value,
       }));
 
-      for (const { name, value, format } of fields) {
-        if (format !== "Html" && value.length > 50) {
+      for (const { name, format } of fields) {
+        if (format !== "Html" && isLargeTextField(name)) {
           document.push({ op: "add", path: `/multilineFieldsFormat/${name}`, value: "Markdown" });
         }
       }
@@ -1118,7 +1150,7 @@ function updateWorkItemsBatch(tokenProvider: () => Promise<AccessToken>, connect
           id: z.number().describe("Work item ID to update."),
           path: z.string().describe("Field path, e.g. '/fields/System.Title'."),
           value: z.string().describe("New value. Required for 'add'/'replace'."),
-          format: z.enum(["Html", "Markdown"]).optional().describe("Format for large text fields. Defaults to 'Html'."),
+          format: z.enum(["Html", "Markdown"]).optional().describe("Format for large text fields such as System.Description. Ignored for other field types. Defaults to 'Html'."),
         })
       )
       .describe("Updates grouped by work item. Multiple entries per ID are merged into one PATCH call per work item."),
@@ -1133,8 +1165,8 @@ function updateWorkItemsBatch(tokenProvider: () => Promise<AccessToken>, connect
         const itemUpdates = updates.filter((u) => u.id === id);
         const operations: { op: string; path: string; value: string }[] = itemUpdates.map(({ op, path, value }) => ({ op: op ?? "add", path, value }));
 
-        for (const { path, value, format } of itemUpdates) {
-          if (format === "Markdown" && value && value.length > 50) {
+        for (const { path, format } of itemUpdates) {
+          if (format === "Markdown" && isLargeTextField(path)) {
             operations.push({ op: "add", path: `/multilineFieldsFormat${path.replace("/fields", "")}`, value: "Markdown" });
           }
         }

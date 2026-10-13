@@ -331,6 +331,7 @@ export const REPO_TOOLS = {
   list_my_azure_devops_branches: "list_my_azure_devops_branches",
   get_azure_devops_branch_by_name: "get_azure_devops_branch_by_name",
   create_azure_devops_pull_request: "create_azure_devops_pull_request",
+  update_azure_devops_pull_request: "update_azure_devops_pull_request",
   get_azure_devops_item_diff_by_commits: "get_azure_devops_item_diff_by_commits",
   get_azure_devops_item_diff_by_object_ids: "get_azure_devops_item_diff_by_object_ids",
 };
@@ -347,6 +348,7 @@ type ToolConfigType =
   | ReturnType<typeof resolveComment>
   | ReturnType<typeof createPullRequestThread>
   | ReturnType<typeof createPullRequest>
+  | ReturnType<typeof updatePullRequest>
   | ReturnType<typeof listMyBranches>
   | ReturnType<typeof getBranchByName>
   | ReturnType<typeof getItemDiffByCommitsTool>
@@ -365,6 +367,7 @@ export function configureRepoTools(server: McpServer, tokenProvider: () => Promi
   repoTools.push(resolveComment(connectionProvider));
   repoTools.push(createPullRequestThread(connectionProvider));
   repoTools.push(createPullRequest(connectionProvider));
+  repoTools.push(updatePullRequest(connectionProvider));
   repoTools.push(listMyBranches(connectionProvider));
   repoTools.push(getBranchByName(connectionProvider));
   repoTools.push(getItemDiffByCommitsTool(connectionProvider));
@@ -830,6 +833,60 @@ function createPullRequest(connectionProvider: () => Promise<WebApi>) {
   const config: McpToolConfig<typeof inputSchema> = {
     name: REPO_TOOLS.create_azure_devops_pull_request,
     description: "Create a new pull request.",
+    inputSchema,
+    handler,
+  };
+
+  return config;
+}
+
+function updatePullRequest(connectionProvider: () => Promise<WebApi>) {
+  const inputSchema = {
+    repositoryId: z.string().describe("The ID or name of the repository where the pull request is located."),
+    pullRequestId: z.number().describe("The ID of the pull request to update."),
+    title: z.string().optional().describe("The new title of the pull request."),
+    description: z.string().max(4000).optional().describe("The new description of the pull request. Must not be longer than 4000 characters."),
+    isDraft: z.boolean().optional().describe("Set to false to publish a draft pull request, or true to mark it as a draft."),
+    targetRefName: z.string().optional().describe("The new target branch name, e.g., 'refs/heads/main'."),
+    status: z.enum(["active", "abandoned", "completed"]).optional().describe("The new status of the pull request."),
+    autoCompleteSetBy: z.string().optional().describe("Identity ID to set as the auto-complete setter. Pass an empty string to cancel auto-complete."),
+  };
+
+  const handler: ToolHandler<typeof inputSchema> = async ({ repositoryId, pullRequestId, title, description, isDraft, targetRefName, status, autoCompleteSetBy }) => {
+    try {
+      const updates: GitPullRequest = {};
+      if (title !== undefined) updates.title = title;
+      if (description !== undefined) updates.description = description;
+      if (isDraft !== undefined) updates.isDraft = isDraft;
+      if (targetRefName !== undefined) updates.targetRefName = targetRefName;
+      if (status !== undefined) {
+        updates.status = status === "active" ? PullRequestStatus.Active : status === "abandoned" ? PullRequestStatus.Abandoned : PullRequestStatus.Completed;
+      }
+      if (autoCompleteSetBy !== undefined) {
+        updates.autoCompleteSetBy = autoCompleteSetBy ? { id: autoCompleteSetBy } : ({ id: null } as unknown as IdentityRef);
+      }
+
+      if (Object.keys(updates).length === 0) {
+        return textToolResult(["No updates provided. Specify at least one field to update."]);
+      }
+
+      const connection = await connectionProvider();
+      const gitApi = await connection.getGitApi();
+      const pullRequest = await gitApi.updatePullRequest(updates, repositoryId, pullRequestId);
+
+      if (!pullRequest) {
+        return textToolResult(["Pull request updated but API returned no data."]);
+      }
+
+      return textToolResult(formatPullRequestLines(toPullRequestResult(pullRequest)));
+    } catch (error) {
+      return getErrorToolResult(error, "Failed to update pull request.");
+    }
+  };
+
+  const config: McpToolConfig<typeof inputSchema> = {
+    name: REPO_TOOLS.update_azure_devops_pull_request,
+    description: "Update an existing pull request. Supports changing title, description, draft state, target branch, status (abandon/reactivate/complete) and auto-complete. Only provided fields are changed.",
     inputSchema,
     handler,
   };
