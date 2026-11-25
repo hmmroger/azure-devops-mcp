@@ -1,8 +1,6 @@
 # ⭐ Azure DevOps MCP Server
 
 > **Note:** This is a forked repository of the official [Microsoft Azure DevOps MCP Server](https://github.com/microsoft/azure-devops-mcp).
->
-
 
 ## 🔧 Fork Changes
 
@@ -29,8 +27,8 @@ Example: `ADO_MCP_DISABLED_TOOLS=category_workitem` + `ADO_MCP_ENABLED_TOOLS=get
 - **Diff support**: New `get_azure_devops_item_diff_by_commits` and `get_azure_devops_item_diff_by_object_ids` produce unified diffs locally with size guards.
 - **Wiki resolution chain**: `get_azure_devops_wiki_page` (by path) and `get_azure_devops_wiki_page_by_url` both resolve to a page path (and a `pageId` when one exists), either of which `get_azure_devops_wiki_page_content` accepts — path is preferred because pages created in the Azure DevOps UI may have no numeric ID. Page content is line-paginated (`startLine`/`limit`) with `[LNNN]` markers, matching the repo item-content tools.
 - **Org switching at runtime**: `change_azure_devops_org` and `get_azure_devops_org` let agents work across multiple ADO organizations in one session.
+- **PR thread filtering & resolve status**: `list_azure_devops_pull_request_threads` filters by `status` (array) and `author` (ID, email, display name, or `@me`); `resolve_azure_devops_pull_request_thread` accepts a `status` (`Fixed` default, `WontFix`, `Closed`, `ByDesign`).
 - **Tools removed**: Builds, Releases, and Test Plans tools are not included in this fork.
-
 
 ## Original README
 
@@ -122,7 +120,7 @@ Interact with these Azure DevOps services:
 - **repo_list_branches_by_repo**: Retrieve a list of branches for a given repository.
 - **repo_list_my_branches_by_repo**: Retrieve a list of my branches for a given repository Id.
 - **repo_list_pull_requests_by_commits**: List pull requests associated with commits.
-- **repo_list_pull_request_threads**: Retrieve a list of comment threads for a pull request.
+- **list_azure_devops_pull_request_threads**: Retrieve a list of comment threads for a pull request. Supports filtering by thread `status` (e.g. `Active`, `Fixed`) and thread `author` (ID, email, display name, or `@me`).
 - **repo_list_pull_request_thread_comments**: Retrieve a list of comments in a pull request thread.
 - **repo_get_repo_by_name_or_id**: Get the repository by project and repository name or ID.
 - **repo_get_branch_by_name**: Get a branch by its name.
@@ -132,7 +130,7 @@ Interact with these Azure DevOps services:
 - **update_azure_devops_pull_request**: Update an existing pull request (title, description, draft state, target branch, status, auto-complete).
 - **repo_update_pull_request_reviewers**: Add or remove reviewers for an existing pull request.
 - **repo_reply_to_comment**: Replies to a specific comment on a pull request.
-- **repo_resolve_comment**: Resolves a specific comment thread on a pull request.
+- **resolve_azure_devops_pull_request_thread**: Resolves a pull request comment thread with a given status (`Fixed` default, `WontFix`, `Closed`, `ByDesign`).
 - **repo_search_commits**: Searches for commits.
 
 ### 🛰️ Builds

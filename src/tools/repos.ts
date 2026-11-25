@@ -36,6 +36,7 @@ import { getEnumKeys } from "../utils.js";
 
 const MAX_DIFF_INPUT_BYTES = 512 * 1024;
 const MAX_DIFF_LINES = 2000;
+const RESOLVED_THREAD_STATUSES = ["Fixed", "WontFix", "Closed", "ByDesign"] as const satisfies readonly (keyof typeof CommentThreadStatus)[];
 
 interface ItemDiffResult {
   diff: string;
@@ -523,6 +524,29 @@ function getContentByObjectIdTool(connectionProvider: () => Promise<WebApi>) {
   return config;
 }
 
+function getThreadAuthor(thread: GitPullRequestCommentThread): IdentityRef | undefined {
+  const comments = thread.comments ?? [];
+  if (comments.length === 0) {
+    return undefined;
+  }
+
+  return comments.reduce((first, c) => ((c.id ?? Number.MAX_SAFE_INTEGER) < (first.id ?? Number.MAX_SAFE_INTEGER) ? c : first)).author;
+}
+
+async function createThreadAuthorMatcher(connection: WebApi, author: string): Promise<(identity?: IdentityRef) => boolean> {
+  const needle = author.trim().toLowerCase();
+  if (needle === "@me") {
+    const connectionData = await connection.connect();
+    const myId = connectionData.authenticatedUser?.id?.toLowerCase();
+    if (!myId) {
+      throw new Error("Unable to resolve the authenticated user.");
+    }
+    return (identity) => identity?.id?.toLowerCase() === myId;
+  }
+
+  return (identity) => !!identity && (identity.id?.toLowerCase() === needle || identity.uniqueName?.toLowerCase() === needle || !!identity.displayName?.toLowerCase().includes(needle));
+}
+
 function listPullRequestThreads(connectionProvider: () => Promise<WebApi>) {
   const inputSchema = {
     repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
@@ -530,21 +554,38 @@ function listPullRequestThreads(connectionProvider: () => Promise<WebApi>) {
     project: z.string().optional().describe("Project ID or project name (optional)"),
     iteration: z.number().optional().describe("The iteration ID for which to retrieve threads. Optional, defaults to the latest iteration."),
     baseIteration: z.number().optional().describe("The base iteration ID for which to retrieve threads. Optional, defaults to the latest base iteration."),
+    status: z
+      .array(z.enum(getEnumKeys(CommentThreadStatus) as [string, ...string[]]))
+      .optional()
+      .describe("Only return threads with one of these statuses (e.g. ['Active', 'Pending'] for open threads, ['Fixed', 'WontFix', 'Closed', 'ByDesign'] for resolved threads)."),
+    author: z
+      .string()
+      .optional()
+      .describe(
+        "Only return threads created by this author. Matches the first comment's author by ID, unique name (email), or display name (case-insensitive, partial). Use '@me' for the authenticated user."
+      ),
     top: z.number().optional().describe("The maximum number of threads to return."),
     skip: z.number().optional().describe("The number of threads to skip."),
   };
-  const handler: ToolHandler<typeof inputSchema> = async ({ repositoryId, pullRequestId, project, iteration, baseIteration, top, skip }) => {
+  const handler: ToolHandler<typeof inputSchema> = async ({ repositoryId, pullRequestId, project, iteration, baseIteration, status, author, top, skip }) => {
     try {
       const effectiveTop = top ?? 100;
       const effectiveSkip = skip ?? 0;
       const connection = await connectionProvider();
       const gitApi = await connection.getGitApi();
       const threads = await gitApi.getThreads(repositoryId, pullRequestId, project, iteration, baseIteration);
-      const sortedThreads = (threads ?? []).sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+
+      const statusFilter = status?.length ? new Set(status.map((s) => CommentThreadStatus[s as keyof typeof CommentThreadStatus])) : undefined;
+      const authorMatcher = author ? await createThreadAuthorMatcher(connection, author) : undefined;
+      const sortedThreads = (threads ?? [])
+        .filter((t) => !statusFilter || (t.status !== undefined && statusFilter.has(t.status)))
+        .filter((t) => !authorMatcher || authorMatcher(getThreadAuthor(t)))
+        .sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
       const paginatedThreads = sortedThreads.slice(effectiveSkip, effectiveSkip + effectiveTop);
 
       if (paginatedThreads.length === 0) {
-        return textToolResult([`No threads found in PR #${pullRequestId}.`]);
+        const filterSuffix = statusFilter || authorMatcher ? " matching the given filters" : "";
+        return textToolResult([`No threads found in PR #${pullRequestId}${filterSuffix}.`]);
       }
 
       const header = `Threads in PR #${pullRequestId}:`;
@@ -558,7 +599,7 @@ function listPullRequestThreads(connectionProvider: () => Promise<WebApi>) {
 
   const config: McpToolConfig<typeof inputSchema> = {
     name: REPO_TOOLS.list_azure_devops_pull_request_threads,
-    description: "Retrieve a list of comment threads for a pull request.",
+    description: "Retrieve a list of comment threads for a pull request. Optionally filter by thread status and/or thread author.",
     inputSchema,
     handler,
   };
@@ -645,15 +686,17 @@ function resolveComment(connectionProvider: () => Promise<WebApi>) {
     repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
     pullRequestId: z.number().describe("The ID of the pull request where the comment thread exists."),
     threadId: z.number().describe("The ID of the thread to be resolved."),
+    status: z.enum(RESOLVED_THREAD_STATUSES).optional().default("Fixed").describe("The resolved status to set on the thread: 'Fixed' (default), 'WontFix', 'Closed', or 'ByDesign'."),
+    project: z.string().optional().describe("Project ID or project name (optional)"),
   };
-  const handler: ToolHandler<typeof inputSchema> = async ({ repositoryId, pullRequestId, threadId }) => {
+  const handler: ToolHandler<typeof inputSchema> = async ({ repositoryId, pullRequestId, threadId, status, project }) => {
     try {
       const connection = await connectionProvider();
       const gitApi = await connection.getGitApi();
-      const thread = await gitApi.updateThread({ status: CommentThreadStatus.Fixed }, repositoryId, pullRequestId, threadId);
+      const thread = await gitApi.updateThread({ status: CommentThreadStatus[status] }, repositoryId, pullRequestId, threadId, project);
 
-      const status = thread.status !== undefined ? CommentThreadStatus[thread.status] : "Unknown";
-      return textToolResult([`Thread #${threadId} in PR #${pullRequestId} resolved (status: ${status}).`]);
+      const newStatus = thread.status !== undefined ? CommentThreadStatus[thread.status] : "Unknown";
+      return textToolResult([`Thread #${threadId} in PR #${pullRequestId} resolved (status: ${newStatus}).`]);
     } catch (error) {
       return getErrorToolResult(error, "Failed to resolve comment thread.");
     }
@@ -661,7 +704,7 @@ function resolveComment(connectionProvider: () => Promise<WebApi>) {
 
   const config: McpToolConfig<typeof inputSchema> = {
     name: REPO_TOOLS.resolve_azure_devops_pull_request_thread,
-    description: "Mark a pull request comment thread as resolved (status: Fixed).",
+    description: "Resolve a pull request comment thread with the given status (Fixed, WontFix, Closed, or ByDesign). Defaults to Fixed.",
     inputSchema,
     handler,
   };
@@ -886,7 +929,8 @@ function updatePullRequest(connectionProvider: () => Promise<WebApi>) {
 
   const config: McpToolConfig<typeof inputSchema> = {
     name: REPO_TOOLS.update_azure_devops_pull_request,
-    description: "Update an existing pull request. Supports changing title, description, draft state, target branch, status (abandon/reactivate/complete) and auto-complete. Only provided fields are changed.",
+    description:
+      "Update an existing pull request. Supports changing title, description, draft state, target branch, status (abandon/reactivate/complete) and auto-complete. Only provided fields are changed.",
     inputSchema,
     handler,
   };
