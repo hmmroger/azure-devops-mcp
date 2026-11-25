@@ -25,6 +25,9 @@ import {
   Comment,
   GitPullRequestCommentThread,
   GitForkRef,
+  GitPullRequestChange,
+  GitPullRequestIteration,
+  IterationReason,
 } from "azure-devops-node-api/interfaces/GitInterfaces.js";
 import { TeamProjectReference, WebApiTagDefinition } from "azure-devops-node-api/interfaces/CoreInterfaces.js";
 import { z, ZodRawShape } from "zod";
@@ -36,6 +39,9 @@ import { getEnumKeys } from "../utils.js";
 
 const MAX_DIFF_INPUT_BYTES = 512 * 1024;
 const MAX_DIFF_LINES = 2000;
+const COMMIT_DIFFS_PAGE_SIZE = 100;
+const SHA1_REGEX = /^[0-9a-fA-F]{40}$/;
+const MAX_PR_CHANGED_ITEMS = 2000;
 const RESOLVED_THREAD_STATUSES = ["Fixed", "WontFix", "Closed", "ByDesign"] as const satisfies readonly (keyof typeof CommentThreadStatus)[];
 
 interface ItemDiffResult {
@@ -307,20 +313,92 @@ function formatPullRequestLines(pr: PullRequestResult): string[] {
   }
 
   const diffs = pr.changesFromAllCommits;
-  const changes = diffs?.changes ?? [];
+  const changes = (diffs?.changes ?? []).filter((change) => !change.item?.isFolder);
   if (changes.length > 0) {
-    const completeness = diffs?.allChangesIncluded === false ? " (truncated)" : "";
+    const truncated = diffs?.allChangesIncluded === false;
+    const completeness = truncated ? `, truncated at ${MAX_PR_CHANGED_ITEMS}` : "";
     const range = `, ${stripRefHeads(pr.sourceRefName ?? "")} -> ${stripRefHeads(pr.targetRefName ?? "")}`;
-    lines.push("", `Changed Items (${changes.length}${completeness}${range}):`, ...changes.filter((change) => !change.item?.isFolder).map((c) => `  ${formatChangeLine(c)}`));
+    lines.push("", `Changed Items (${changes.length}${completeness}${range}):`, ...changes.map((c) => `  ${formatChangeLine(c)}`));
     lines.push("", "Note: these are the full changesFromAllCommits set. Pass Object ID and Original Object ID to get_azure_devops_item_diff_by_object_ids for per-file diffs.");
+    if (truncated) {
+      lines.push(`Use ${REPO_TOOLS.get_azure_devops_pull_request_iteration_changes} with top/skip to page through the remaining changes.`);
+    }
   }
 
   return lines;
 }
 
+const formatIterationReason = (reason?: IterationReason): string => {
+  if (reason === undefined) return "";
+  if (reason === IterationReason.Push) return "Push";
+  const names = Object.entries(IterationReason)
+    .filter(([, value]) => typeof value === "number" && value !== 0 && (reason & value) === value)
+    .map(([name]) => name);
+  return names.length > 0 ? names.join(", ") : String(reason);
+};
+
+const formatIterationLines = (iteration: GitPullRequestIteration): string[] => {
+  const reason = formatIterationReason(iteration.reason);
+  const date = iteration.createdDate ? new Date(iteration.createdDate).toISOString() : "";
+  const author = iteration.author ? ` by ${formatIdentitySummary(toIdentityResult(iteration.author))}` : "";
+  const lines = [`- Iteration ${iteration.id}${reason ? ` [${reason}]` : ""} (${date})${author}`];
+  if (iteration.sourceRefCommit?.commitId) lines.push(`    - Source Commit ID: ${iteration.sourceRefCommit.commitId}`);
+  if (iteration.targetRefCommit?.commitId) lines.push(`    - Target Commit ID: ${iteration.targetRefCommit.commitId}`);
+  if (iteration.commonRefCommit?.commitId) lines.push(`    - Common Commit ID: ${iteration.commonRefCommit.commitId}`);
+  if (iteration.oldTargetRefName && iteration.newTargetRefName) {
+    lines.push(`    - Retarget: ${stripRefHeads(iteration.oldTargetRefName)} -> ${stripRefHeads(iteration.newTargetRefName)}`);
+  }
+  if (iteration.description) lines.push(`    - Description: ${iteration.description.split("\n", 1)[0]}`);
+  return lines;
+};
+
+const formatPullRequestChangeLine = (change: GitPullRequestChange): string => {
+  const line = formatChangeLine(toGitChangeResult(change));
+  return change.changeTrackingId !== undefined ? `${line}\n    - Change Tracking ID: ${change.changeTrackingId}` : line;
+};
+
+async function getPagedCommitDiffs(
+  gitApi: Awaited<ReturnType<WebApi["getGitApi"]>>,
+  repositoryId: string,
+  diffCommonCommit: boolean,
+  baseVersionDescriptor: GitBaseVersionDescriptor,
+  targetVersionDescriptor: GitTargetVersionDescriptor,
+  maxChanges: number,
+  startSkip = 0
+): Promise<GitCommitDiffs | undefined> {
+  let result: GitCommitDiffs | undefined;
+  const changes: GitChange[] = [];
+  let skip = startSkip;
+  let allChangesIncluded = false;
+
+  while (changes.length < maxChanges) {
+    const pageSize = Math.min(COMMIT_DIFFS_PAGE_SIZE, maxChanges - changes.length);
+    const page = await gitApi.getCommitDiffs(repositoryId, undefined, diffCommonCommit, pageSize, skip, baseVersionDescriptor, targetVersionDescriptor);
+    if (!page) break;
+    result = result ?? page;
+    const pageChanges = page.changes ?? [];
+    changes.push(...pageChanges);
+    skip += pageChanges.length;
+    if (page.allChangesIncluded || pageChanges.length < pageSize) {
+      allChangesIncluded = true;
+      break;
+    }
+  }
+
+  if (!result) return undefined;
+  return { ...result, changes, allChangesIncluded };
+}
+
+function formatIterationChangesLines(changeEntries: GitPullRequestChange[]): string[] {
+  return changeEntries.filter((c) => !c.item?.isFolder).map(formatPullRequestChangeLine);
+}
+
 export const REPO_TOOLS = {
   get_azure_devops_repositories: "get_azure_devops_repositories",
   get_azure_devops_pull_request_by_id: "get_azure_devops_pull_request_by_id",
+  list_azure_devops_pull_request_iterations: "list_azure_devops_pull_request_iterations",
+  get_azure_devops_pull_request_iteration_changes: "get_azure_devops_pull_request_iteration_changes",
+  get_azure_devops_changes_between_commits: "get_azure_devops_changes_between_commits",
   get_azure_devops_changes_by_commit: "get_azure_devops_changes_by_commit",
   get_azure_devops_item_content_by_commit: "get_azure_devops_item_content_by_commit",
   get_azure_devops_content_by_objectid: "get_azure_devops_content_by_objectid",
@@ -340,6 +418,9 @@ export const REPO_TOOLS = {
 type ToolConfigType =
   | ReturnType<typeof getRepositories>
   | ReturnType<typeof getPullRequestById>
+  | ReturnType<typeof listPullRequestIterations>
+  | ReturnType<typeof getPullRequestIterationChanges>
+  | ReturnType<typeof getChangesBetweenCommits>
   | ReturnType<typeof getChangesByCommit>
   | ReturnType<typeof getItemContentByCommitTool>
   | ReturnType<typeof getContentByObjectIdTool>
@@ -359,6 +440,9 @@ export function configureRepoTools(server: McpServer, tokenProvider: () => Promi
   const repoTools: ToolConfigType[] = [];
   repoTools.push(getRepositories(connectionProvider));
   repoTools.push(getPullRequestById(connectionProvider));
+  repoTools.push(listPullRequestIterations(connectionProvider));
+  repoTools.push(getPullRequestIterationChanges(connectionProvider));
+  repoTools.push(getChangesBetweenCommits(connectionProvider));
   repoTools.push(getChangesByCommit(connectionProvider));
   repoTools.push(getItemContentByCommitTool(connectionProvider));
   repoTools.push(getContentByObjectIdTool(connectionProvider));
@@ -439,6 +523,163 @@ function getPullRequestById(connectionProvider: () => Promise<WebApi>) {
   return config;
 }
 
+function listPullRequestIterations(connectionProvider: () => Promise<WebApi>) {
+  const inputSchema = {
+    repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
+    pullRequestId: z.number().describe("The ID of the pull request."),
+  };
+  const handler: ToolHandler<typeof inputSchema> = async ({ repositoryId, pullRequestId }) => {
+    try {
+      const connection = await connectionProvider();
+      const gitApi = await connection.getGitApi();
+      const iterations = (await gitApi.getPullRequestIterations(repositoryId, pullRequestId)) ?? [];
+      if (iterations.length === 0) {
+        return textToolResult([`No iterations found for pull request #${pullRequestId}.`]);
+      }
+
+      const sorted = [...iterations].sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+      return textToolResult([
+        `Iterations of pull request #${pullRequestId} (${sorted.length}, oldest first):`,
+        ...sorted.flatMap(formatIterationLines),
+        "",
+        `Note: use ${REPO_TOOLS.get_azure_devops_pull_request_iteration_changes} with iterationId and compareTo to see what changed between iterations.`,
+      ]);
+    } catch (error) {
+      return getErrorToolResult(error, "Failed to list pull request iterations.");
+    }
+  };
+
+  const config: McpToolConfig<typeof inputSchema> = {
+    name: REPO_TOOLS.list_azure_devops_pull_request_iterations,
+    description: "List the iterations (pushes) of a pull request with their source/target commit IDs. Use to find iteration IDs for re-reviews.",
+    inputSchema,
+    handler,
+  };
+
+  return config;
+}
+
+function getPullRequestIterationChanges(connectionProvider: () => Promise<WebApi>) {
+  const inputSchema = {
+    repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
+    pullRequestId: z.number().describe("The ID of the pull request."),
+    iterationId: z.number().optional().describe("The iteration to view. Defaults to the latest iteration."),
+    compareTo: z
+      .number()
+      .optional()
+      .describe("Iteration ID to compare against (e.g. the last reviewed iteration) to get only what changed since then. Omit or 0 to compare against the target branch (full PR diff)."),
+    top: z.number().optional().describe("Maximum number of changes to return (max 2000). Defaults to 100."),
+    skip: z.number().optional().describe("Number of changes to skip for paging. Defaults to 0."),
+  };
+  const handler: ToolHandler<typeof inputSchema> = async ({ repositoryId, pullRequestId, iterationId, compareTo, top, skip }) => {
+    try {
+      const effectiveTop = Math.min(top ?? 100, 2000);
+      const effectiveSkip = skip ?? 0;
+      const connection = await connectionProvider();
+      const gitApi = await connection.getGitApi();
+
+      const iterations = (await gitApi.getPullRequestIterations(repositoryId, pullRequestId)) ?? [];
+      const latestId = iterations.reduce((max, i) => Math.max(max, i.id ?? 0), 0);
+      const effectiveIterationId = iterationId ?? latestId;
+      if (!effectiveIterationId) {
+        return textToolResult([`No iterations found for pull request #${pullRequestId}.`], true);
+      }
+
+      const iteration = iterations.find((i) => i.id === effectiveIterationId);
+      const baseIteration = compareTo ? iterations.find((i) => i.id === compareTo) : undefined;
+      const result = await gitApi.getPullRequestIterationChanges(repositoryId, pullRequestId, effectiveIterationId, undefined, effectiveTop, effectiveSkip, compareTo || undefined);
+      const changes = formatIterationChangesLines(result?.changeEntries ?? []);
+      const scope = compareTo ? `since iteration ${compareTo}` : "vs. target branch";
+      const header = `Changes in pull request #${pullRequestId} iteration ${effectiveIterationId} ${scope} (latest iteration: ${latestId}):`;
+
+      const lines = [header];
+      if (iteration?.sourceRefCommit?.commitId) lines.push(`Iteration ${effectiveIterationId} Source Commit ID: ${iteration.sourceRefCommit.commitId}`);
+      if (baseIteration?.sourceRefCommit?.commitId) lines.push(`Iteration ${compareTo} Source Commit ID: ${baseIteration.sourceRefCommit.commitId}`);
+
+      const shown = result?.changeEntries?.length ?? 0;
+      const range = shown > 0 ? `${effectiveSkip + 1}-${effectiveSkip + shown}` : "0";
+      const more = result?.nextSkip ? `yes (set skip=${result.nextSkip})` : "no";
+      lines.push(`[Range: ${range} | Top: ${effectiveTop} | Skip: ${effectiveSkip} | More: ${more}]`);
+
+      if (changes.length === 0) {
+        lines.push("No file changes.");
+        return textToolResult(lines);
+      }
+
+      lines.push(...changes);
+      lines.push(
+        "",
+        `Note: pass Object ID and Original Object ID to ${REPO_TOOLS.get_azure_devops_item_diff_by_object_ids} for per-file diffs, or use ${REPO_TOOLS.get_azure_devops_item_diff_by_commits} with the source commit IDs above.`
+      );
+      return textToolResult(lines);
+    } catch (error) {
+      return getErrorToolResult(error, "Failed to get pull request iteration changes.");
+    }
+  };
+
+  const config: McpToolConfig<typeof inputSchema> = {
+    name: REPO_TOOLS.get_azure_devops_pull_request_iteration_changes,
+    description: "Get changed files of a pull request iteration, either vs. the target branch or vs. an earlier iteration (compareTo) for incremental re-reviews. Paginated.",
+    inputSchema,
+    handler,
+  };
+
+  return config;
+}
+
+function getChangesBetweenCommits(connectionProvider: () => Promise<WebApi>) {
+  const inputSchema = {
+    repositoryId: z.string().describe("The ID of the repository."),
+    baseCommitId: z.string().describe("The base commit ID (e.g. the last reviewed commit)."),
+    targetCommitId: z.string().describe("The target commit ID (e.g. the PR's latest commit)."),
+    diffCommonCommit: z.boolean().optional().describe("If true, diff from the merge base of the two commits instead of baseCommitId directly. Defaults to false."),
+    top: z.number().optional().describe(`Maximum number of changes to return (max ${MAX_PR_CHANGED_ITEMS}). Defaults to 100.`),
+    skip: z.number().optional().describe("Number of changes to skip for paging. Defaults to 0."),
+  };
+  const handler: ToolHandler<typeof inputSchema> = async ({ repositoryId, baseCommitId, targetCommitId, diffCommonCommit, top, skip }) => {
+    try {
+      const effectiveTop = Math.min(top ?? 100, MAX_PR_CHANGED_ITEMS);
+      const effectiveSkip = skip ?? 0;
+      const connection = await connectionProvider();
+      const gitApi = await connection.getGitApi();
+      const diffs = await getPagedCommitDiffs(
+        gitApi,
+        repositoryId,
+        diffCommonCommit ?? false,
+        { version: baseCommitId, versionType: GitVersionType.Commit },
+        { version: targetCommitId, versionType: GitVersionType.Commit },
+        effectiveTop,
+        effectiveSkip
+      );
+      const rawChanges = diffs?.changes ?? [];
+      const changes = rawChanges.map(toGitChangeResult).filter((c) => !c.item?.isFolder);
+      const range = rawChanges.length > 0 ? `${effectiveSkip + 1}-${effectiveSkip + rawChanges.length}` : "0";
+      const more = diffs?.allChangesIncluded === false ? `yes (set skip=${effectiveSkip + rawChanges.length})` : "no";
+      const lines = [`Changes from ${baseCommitId} to ${targetCommitId}:`, `[Range: ${range} | Top: ${effectiveTop} | Skip: ${effectiveSkip} | More: ${more}]`];
+
+      if (changes.length === 0) {
+        lines.push("No file changes.");
+        return textToolResult(lines);
+      }
+
+      lines.push(...changes.map(formatChangeLine));
+      lines.push("", `Note: pass Object ID and Original Object ID to ${REPO_TOOLS.get_azure_devops_item_diff_by_object_ids} for per-file diffs.`);
+      return textToolResult(lines);
+    } catch (error) {
+      return getErrorToolResult(error, "Failed to get changes between commits.");
+    }
+  };
+
+  const config: McpToolConfig<typeof inputSchema> = {
+    name: REPO_TOOLS.get_azure_devops_changes_between_commits,
+    description: "Get changed files between two commits in one call (e.g. last reviewed commit -> PR head). Paginated.",
+    inputSchema,
+    handler,
+  };
+
+  return config;
+}
+
 function getChangesByCommit(connectionProvider: () => Promise<WebApi>) {
   const inputSchema = {
     repositoryId: z.string().describe("The ID of the repository where the commit is located."),
@@ -501,7 +742,7 @@ function getItemContentByCommitTool(connectionProvider: () => Promise<WebApi>) {
 function getContentByObjectIdTool(connectionProvider: () => Promise<WebApi>) {
   const inputSchema = {
     repositoryId: z.string().describe("The ID of the repository."),
-    objectId: z.string().describe("The SHA-1 hash of the Git object (blob)."),
+    objectId: z.string().regex(SHA1_REGEX, "Must be a 40-character hex SHA-1.").describe("The SHA-1 hash of the Git object (blob)."),
     startLine: z.number().optional().describe("1-indexed line number to start reading from. Default: 1."),
     limit: z.number().optional().describe("Maximum number of lines to return starting from startLine. Default: 500"),
   };
@@ -1075,8 +1316,8 @@ function getItemDiffByCommitsTool(connectionProvider: () => Promise<WebApi>) {
 function getItemDiffByObjectIdsTool(connectionProvider: () => Promise<WebApi>) {
   const inputSchema = {
     repositoryId: z.string().describe("Repository ID."),
-    baseObjectId: z.string().describe("SHA-1 of the base blob."),
-    targetObjectId: z.string().describe("SHA-1 of the target blob."),
+    baseObjectId: z.string().regex(SHA1_REGEX, "Must be a 40-character hex SHA-1.").describe("SHA-1 of the base blob."),
+    targetObjectId: z.string().regex(SHA1_REGEX, "Must be a 40-character hex SHA-1.").describe("SHA-1 of the target blob."),
     itemPath: z.string().optional().describe("Optional item path, used only as a label in the diff header."),
   };
   const handler: ToolHandler<typeof inputSchema> = async ({ repositoryId, baseObjectId, targetObjectId, itemPath }) => {
@@ -1115,6 +1356,23 @@ function getItemDiffByObjectIdsTool(connectionProvider: () => Promise<WebApi>) {
   return config;
 }
 
+// azure-devops-node-api returns the raw IncomingMessage for content APIs without checking the status,
+// so error responses (e.g. invalid object ID) would otherwise be read as file content.
+async function readContentStream(stream: NodeJS.ReadableStream, description: string): Promise<string> {
+  const statusCode = (stream as NodeJS.ReadableStream & { statusCode?: number }).statusCode;
+  const content = await streamToString(stream);
+  if (statusCode !== undefined && (statusCode < 200 || statusCode >= 300)) {
+    let message = content;
+    try {
+      message = (JSON.parse(content) as { message?: string }).message ?? content;
+    } catch {
+      // Non-JSON error body; use as-is.
+    }
+    throw new Error(`Failed to get ${description} (HTTP ${statusCode}): ${message.slice(0, 500)}`);
+  }
+  return content;
+}
+
 function streamToString(stream: NodeJS.ReadableStream): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -1135,7 +1393,7 @@ export async function getItemContentByCommit(connectionProvider: () => Promise<W
   };
 
   const stream = await gitApi.getItemContent(repositoryId, itemPath, undefined, undefined, undefined, true, undefined, false, itemVersion, true);
-  return await streamToString(stream);
+  return await readContentStream(stream, `item '${itemPath}' at commit ${commitId}`);
 }
 
 export async function getContentByObjectId(connectionProvider: () => Promise<WebApi>, repositoryId: string, objectId: string): Promise<string> {
@@ -1143,7 +1401,7 @@ export async function getContentByObjectId(connectionProvider: () => Promise<Web
   const gitApi = await connection.getGitApi();
 
   const stream = await gitApi.getBlobContent(repositoryId, objectId);
-  return await streamToString(stream);
+  return await readContentStream(stream, `blob ${objectId}`);
 }
 
 export async function getRepositoriesResult(connectionProvider: () => Promise<WebApi>, project: string, repositoryNameOrId?: string): Promise<RepositoryResult[]> {
@@ -1182,15 +1440,7 @@ export async function getPullRequestResult(connectionProvider: () => Promise<Web
       versionType: GitVersionType.Commit,
     };
 
-    const diffs = await gitApi.getCommitDiffs(
-      repositoryId,
-      undefined,
-      true, // diffCommonCommit
-      100,
-      undefined,
-      baseVersionDescriptor,
-      targetVersionDescriptor
-    );
+    const diffs = await getPagedCommitDiffs(gitApi, repositoryId, true, baseVersionDescriptor, targetVersionDescriptor, MAX_PR_CHANGED_ITEMS);
     prResult.changesFromAllCommits = diffs && toGitCommitDiffsResult(diffs);
   }
   return prResult;
